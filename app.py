@@ -22,7 +22,7 @@ st.set_page_config(page_title="DJ IA - Pedidos", page_icon="🎵")
 
 @st.cache_resource
 def setup_apis():
-    # Setup Gemini
+    # Setup Gemini (do jeito que já estava)
     if not GEMINI_API_KEY or GEMINI_API_KEY == "SUA_CHAVE_AQUI":
         return None, None, "GEMINI_API_KEY não configurada. Defina em variável de ambiente ou no código."
 
@@ -32,14 +32,30 @@ def setup_apis():
     except Exception as e:
         return None, None, f"Erro ao configurar Gemini: {e}"
 
-    # Setup YTMusic
-    if not os.path.exists(ARQUIVO_AUTH):
-        return None, None, "Arquivo browser.json não encontrado!"
+    # --- Setup YTMusic ---
+    auth_headers = None
+
+    # 1) tenta pegar dos secrets (ambiente da Streamlit Cloud)
+    if "BROWSER_JSON" in st.secrets:
+        try:
+            auth_headers = json.loads(st.secrets["BROWSER_JSON"])
+        except Exception as e:
+            return None, None, f"Erro ao ler BROWSER_JSON dos secrets: {e}"
+
     try:
-        yt = YTMusic(ARQUIVO_AUTH)
+        if auth_headers:
+            yt = YTMusic(auth_headers=auth_headers)
+        else:
+            # fallback: usar arquivo local (quando você roda na sua máquina)
+            ARQUIVO_AUTH = "browser.json"
+            if not os.path.exists(ARQUIVO_AUTH):
+                return model, None, "Arquivo browser.json não encontrado e nenhum BROWSER_JSON definido nos secrets."
+            yt = YTMusic(ARQUIVO_AUTH)
+
         return model, yt, None
     except Exception as e:
         return None, None, f"Erro ao configurar YTMusic: {e}"
+
 
 
 @st.cache_resource
