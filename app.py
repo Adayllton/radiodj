@@ -9,8 +9,8 @@ from lyricsgenius import Genius
 # Recomendo fortemente usar variáveis de ambiente:
 #   export GEMINI_API_KEY="sua_chave_aqui"
 #   export GENIUS_ACCESS_TOKEN="seu_token_genius_aqui"
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "")  # troque se quiser
-GENIUS_ACCESS_TOKEN = ""          # opcional, mas necessário p/ busca web
+GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
+GENIUS_ACCESS_TOKEN = st.secrets.get("GENIUS_ACCESS_TOKEN") or os.getenv("GENIUS_ACCESS_TOKEN")
 PLAYLIST_ID = "PL_45f9jLesgjdE5usz75-zDtBt7ChSM5f"  # sem &jct
 ARQUIVO_AUTH = "browser.json"  # mesmo arquivo gerado pelo ytmusicapi browser
 
