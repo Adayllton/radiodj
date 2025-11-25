@@ -9,11 +9,13 @@ from lyricsgenius import Genius
 # Recomendo fortemente usar variáveis de ambiente:
 #   export GEMINI_API_KEY="sua_chave_aqui"
 #   export GENIUS_ACCESS_TOKEN="seu_token_genius_aqui"
+PLAYLIST_ID = "PL_45f9jLesgjdE5usz75-zDtBt7ChSM5f"  # sem &jct
+
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
 GENIUS_ACCESS_TOKEN = st.secrets.get("GENIUS_ACCESS_TOKEN") or os.getenv("GENIUS_ACCESS_TOKEN")
-PLAYLIST_ID = "PL_45f9jLesgjdE5usz75-zDtBt7ChSM5f"  # sem &jct
-ARQUIVO_AUTH = "browser.json"  # mesmo arquivo gerado pelo ytmusicapi browser
-OAUTH_JSON = st.secrets.get("OAUTH_JSON")  # novo
+
+OAUTH_JSON = st.secrets.get("OAUTH_JSON")
+OAUTH_CREDENTIALS_JSON = st.secrets.get("OAUTH_CREDENTIALS_JSON")
 
 
 # Configuração da Página
@@ -24,7 +26,7 @@ st.set_page_config(page_title="DJ IA - Pedidos", page_icon="🎵")
 
 @st.cache_resource
 def setup_apis():
-    # Setup Gemini
+    # --- Gemini ---
     if not GEMINI_API_KEY:
         return None, None, "GEMINI_API_KEY não configurada."
 
@@ -34,34 +36,39 @@ def setup_apis():
     except Exception as e:
         return None, None, f"Erro ao configurar Gemini: {e}"
 
-    # --- Setup YTMusic via OAuth ---
-    auth = None
+    # --- YTMusic via OAuth ---
+    tokens = creds = None
 
-    # 1) tenta pegar o oauth.json dos secrets (ambiente da Streamlit Cloud)
     if OAUTH_JSON:
         try:
-            auth = json.loads(OAUTH_JSON)
+            tokens = json.loads(OAUTH_JSON)
         except Exception as e:
             return None, None, f"Erro ao ler OAUTH_JSON dos secrets: {e}"
 
+    if OAUTH_CREDENTIALS_JSON:
+        try:
+            creds = json.loads(OAUTH_CREDENTIALS_JSON)
+        except Exception as e:
+            return None, None, f"Erro ao ler OAUTH_CREDENTIALS_JSON dos secrets: {e}"
+
     try:
-        if auth:
-            # usa dict do oauth.json
-            yt = YTMusic(auth)
+        if tokens and creds:
+            # usa OAuth completo (tokens + credenciais) em memória
+            yt = YTMusic(auth=tokens, oauth_credentials=creds)
         else:
-            # fallback local: arquivo oauth.json ou browser.json, só pra desenvolvimento
-            if os.path.exists("oauth.json"):
-                yt = YTMusic("oauth.json")
-            elif os.path.exists(ARQUIVO_AUTH):
-                yt = YTMusic(ARQUIVO_AUTH)
+            # fallback local: só pra desenvolvimento na sua máquina
+            if os.path.exists("oauth.json") and os.path.exists("oauth_credentials.json"):
+                yt = YTMusic("oauth.json", oauth_credentials="oauth_credentials.json")
             else:
-                return model, None, "Nenhum oauth.json/browser.json encontrado e nenhum OAUTH_JSON definido nos secrets."
+                return model, None, (
+                    "Configuração OAuth do YTMusic não encontrada. "
+                    "Defina OAUTH_JSON e OAUTH_CREDENTIALS_JSON nos secrets "
+                    "ou deixe os arquivos oauth*.json na pasta."
+                )
 
         return model, yt, None
     except Exception as e:
         return None, None, f"Erro ao configurar YTMusic: {e}"
-
-
 
 
 @st.cache_resource
