@@ -1,28 +1,26 @@
 import streamlit as st
-from ytmusicapi import YTMusic
+from ytmusicapi import YTMusic, OAuthCredentials
 import google.generativeai as genai
 import json
 import os
 from lyricsgenius import Genius
 
 # --- CONFIGURAÇÕES ---
-# Recomendo fortemente usar variáveis de ambiente:
-#   export GEMINI_API_KEY="sua_chave_aqui"
-#   export GENIUS_ACCESS_TOKEN="seu_token_genius_aqui"
 PLAYLIST_ID = "PL_45f9jLesgjdE5usz75-zDtBt7ChSM5f"  # sem &jct
 
+# chaves / tokens vêm de secrets ou variáveis de ambiente
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
 GENIUS_ACCESS_TOKEN = st.secrets.get("GENIUS_ACCESS_TOKEN") or os.getenv("GENIUS_ACCESS_TOKEN")
 
-OAUTH_JSON = st.secrets.get("OAUTH_JSON")
-OAUTH_CREDENTIALS_JSON = st.secrets.get("OAUTH_CREDENTIALS_JSON")
-
+YT_CLIENT_ID = st.secrets.get("YT_CLIENT_ID") or os.getenv("YT_CLIENT_ID")
+YT_CLIENT_SECRET = st.secrets.get("YT_CLIENT_SECRET") or os.getenv("YT_CLIENT_SECRET")
+OAUTH_JSON = st.secrets.get("OAUTH_JSON") or os.getenv("OAUTH_JSON")
 
 # Configuração da Página
 st.set_page_config(page_title="DJ IA - Pedidos", page_icon="🎵")
 
-# --- INICIALIZAÇÃO DAS APIS ---
 
+# --- INICIALIZAÇÃO DAS APIS ---
 
 @st.cache_resource
 def setup_apis():
@@ -36,37 +34,27 @@ def setup_apis():
     except Exception as e:
         return None, None, f"Erro ao configurar Gemini: {e}"
 
-    # --- YTMusic via OAuth ---
-    tokens = creds = None
-
-    if OAUTH_JSON:
-        try:
-            tokens = json.loads(OAUTH_JSON)
-        except Exception as e:
-            return None, None, f"Erro ao ler OAUTH_JSON dos secrets: {e}"
-
-    if OAUTH_CREDENTIALS_JSON:
-        try:
-            creds = json.loads(OAUTH_CREDENTIALS_JSON)
-        except Exception as e:
-            return None, None, f"Erro ao ler OAUTH_CREDENTIALS_JSON dos secrets: {e}"
+    # --- YTMusic via OAuth (oauth.json + client_id/client_secret) ---
+    if not (OAUTH_JSON and YT_CLIENT_ID and YT_CLIENT_SECRET):
+        return model, None, (
+            "OAuth do YTMusic não configurado. "
+            "Defina OAUTH_JSON, YT_CLIENT_ID e YT_CLIENT_SECRET nos secrets."
+        )
 
     try:
-        if tokens and creds:
-            # usa OAuth completo (tokens + credenciais) em memória
-            yt = YTMusic(auth=tokens, oauth_credentials=creds)
-        else:
-            # fallback local: só pra desenvolvimento na sua máquina
-            if os.path.exists("oauth.json") and os.path.exists("oauth_credentials.json"):
-                yt = YTMusic("oauth.json", oauth_credentials="oauth_credentials.json")
-            else:
-                return model, None, (
-                    "Configuração OAuth do YTMusic não encontrada. "
-                    "Defina OAUTH_JSON e OAUTH_CREDENTIALS_JSON nos secrets "
-                    "ou deixe os arquivos oauth*.json na pasta."
-                )
+        # YTMusic espera um caminho de arquivo -> criamos um temporário
+        oauth_path = "oauth_runtime.json"
+        with open(oauth_path, "w", encoding="utf-8") as f:
+            f.write(OAUTH_JSON)
 
+        oauth_creds = OAuthCredentials(
+            client_id=YT_CLIENT_ID,
+            client_secret=YT_CLIENT_SECRET,
+        )
+
+        yt = YTMusic(oauth_path, oauth_credentials=oauth_creds)
         return model, yt, None
+
     except Exception as e:
         return None, None, f"Erro ao configurar YTMusic: {e}"
 
@@ -92,21 +80,24 @@ def setup_genius():
 model, yt, erro_setup = setup_apis()
 genius, erro_genius = setup_genius()
 
-# --- FUNÇÕES DE LÓGICA ---
 
+# --- FUNÇÕES DE LÓGICA ---
 
 def obter_letra_ytmusic(video_id: str):
     """Tenta obter a letra da música a partir do YouTube Music."""
+    if yt is None:
+        return None
+
     try:
-        # 1) Algumas versões do ytmusicapi aceitam videoId direto
+        # 1) algumas versões aceitam videoId direto
         try:
             dados = yt.get_lyrics(video_id)
-            if dados and dados.get("lyrics"):
+            if dados and isinstance(dados, dict) and dados.get("lyrics"):
                 return dados["lyrics"]
         except Exception:
             pass  # se falhar, tenta o fluxo "oficial"
 
-        # 2) Fluxo documentado: get_watch_playlist -> lyrics.browseId -> get_lyrics
+        # 2) fluxo documentado: get_watch_playlist -> lyrics.browseId -> get_lyrics
         watch = yt.get_watch_playlist(videoId=video_id)
         lyrics_info = watch.get("lyrics") if isinstance(watch, dict) else None
         if not lyrics_info:
@@ -117,7 +108,7 @@ def obter_letra_ytmusic(video_id: str):
             return None
 
         dados = yt.get_lyrics(browse_id)
-        if dados and dados.get("lyrics"):
+        if dados and isinstance(dados, dict) and dados.get("lyrics"):
             return dados["lyrics"]
 
         return None
@@ -252,6 +243,10 @@ def analisar_com_ia(titulo, artista, is_explicit, letra=None):
 
 def buscar_musica(termo):
     """Tenta várias estratégias até achar um resultado com videoId."""
+    if yt is None:
+        st.error("YTMusic não está configurado.")
+        return None
+
     try:
         # 1) tenta como 'songs'
         resultados = yt.search(termo, filter="songs", limit=3)
@@ -282,14 +277,20 @@ def buscar_musica(termo):
 # --- INTERFACE (FRONT-END) ---
 
 st.title("🎧 DJ IA: Pedidos (modo Escola)")
-st.write("A IA analisará a LETRA da música (YT Music e web) para ver se é adequada para tocar em ambiente escolar.")
+st.write(
+    "A IA analisará a LETRA da música (YT Music e web) para ver se é adequada "
+    "para tocar em ambiente escolar."
+)
 
 if erro_setup:
     st.error(f"Erro de configuração principal: {erro_setup}")
 if erro_genius:
     st.info(erro_genius)
 
-pedido = st.text_input("Nome da música ou artista", placeholder="Ex: Queen - Bohemian Rhapsody")
+pedido = st.text_input(
+    "Nome da música ou artista",
+    placeholder="Ex: Queen - Bohemian Rhapsody",
+)
 botao_enviar = st.button("Enviar Pedido", type="primary")
 
 if botao_enviar and pedido:
@@ -328,8 +329,10 @@ if botao_enviar and pedido:
                         with st.expander("Ver letra da música"):
                             st.text(letra)
                     else:
-                        st.info("Não encontrei a letra dessa música em nenhuma fonte. "
-                                "Vou decidir só com título + artista + tag explícita.")
+                        st.info(
+                            "Não encontrei a letra dessa música em nenhuma fonte. "
+                            "Vou decidir só com título + artista + tag explícita."
+                        )
 
                 # Análise da IA
                 with st.spinner('🤖 A IA está analisando a letra para ambiente escolar...'):
