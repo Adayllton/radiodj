@@ -13,6 +13,8 @@ GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
 GENIUS_ACCESS_TOKEN = st.secrets.get("GENIUS_ACCESS_TOKEN") or os.getenv("GENIUS_ACCESS_TOKEN")
 PLAYLIST_ID = "PL_45f9jLesgjdE5usz75-zDtBt7ChSM5f"  # sem &jct
 ARQUIVO_AUTH = "browser.json"  # mesmo arquivo gerado pelo ytmusicapi browser
+OAUTH_JSON = st.secrets.get("OAUTH_JSON")  # novo
+
 
 # Configuração da Página
 st.set_page_config(page_title="DJ IA - Pedidos", page_icon="🎵")
@@ -22,9 +24,9 @@ st.set_page_config(page_title="DJ IA - Pedidos", page_icon="🎵")
 
 @st.cache_resource
 def setup_apis():
-    # Setup Gemini (do jeito que já estava)
-    if not GEMINI_API_KEY or GEMINI_API_KEY == "SUA_CHAVE_AQUI":
-        return None, None, "GEMINI_API_KEY não configurada. Defina em variável de ambiente ou no código."
+    # Setup Gemini
+    if not GEMINI_API_KEY:
+        return None, None, "GEMINI_API_KEY não configurada."
 
     try:
         genai.configure(api_key=GEMINI_API_KEY)
@@ -32,30 +34,33 @@ def setup_apis():
     except Exception as e:
         return None, None, f"Erro ao configurar Gemini: {e}"
 
-    # --- Setup YTMusic ---
-    auth_headers = None
+    # --- Setup YTMusic via OAuth ---
+    auth = None
 
-    # 1) tenta pegar dos secrets (ambiente da Streamlit Cloud)
-    if "BROWSER_JSON" in st.secrets:
+    # 1) tenta pegar o oauth.json dos secrets (ambiente da Streamlit Cloud)
+    if OAUTH_JSON:
         try:
-            auth_headers = json.loads(st.secrets["BROWSER_JSON"])
+            auth = json.loads(OAUTH_JSON)
         except Exception as e:
-            return None, None, f"Erro ao ler BROWSER_JSON dos secrets: {e}"
+            return None, None, f"Erro ao ler OAUTH_JSON dos secrets: {e}"
 
     try:
-        if auth_headers:
-            # pode passar como primeiro argumento posicional
-            yt = YTMusic(auth_headers)  # ou: YTMusic(auth=auth_headers)
+        if auth:
+            # usa dict do oauth.json
+            yt = YTMusic(auth)
         else:
-            # fallback: usar arquivo local (quando você roda na sua máquina)
-            ARQUIVO_AUTH = "browser.json"
-            if not os.path.exists(ARQUIVO_AUTH):
-                return model, None, "Arquivo browser.json não encontrado e nenhum BROWSER_JSON definido nos secrets."
-            yt = YTMusic(ARQUIVO_AUTH)
+            # fallback local: arquivo oauth.json ou browser.json, só pra desenvolvimento
+            if os.path.exists("oauth.json"):
+                yt = YTMusic("oauth.json")
+            elif os.path.exists(ARQUIVO_AUTH):
+                yt = YTMusic(ARQUIVO_AUTH)
+            else:
+                return model, None, "Nenhum oauth.json/browser.json encontrado e nenhum OAUTH_JSON definido nos secrets."
 
         return model, yt, None
     except Exception as e:
         return None, None, f"Erro ao configurar YTMusic: {e}"
+
 
 
 
