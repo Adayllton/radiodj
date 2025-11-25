@@ -44,7 +44,8 @@ def setup_apis():
 
     try:
         if auth_headers:
-            yt = YTMusic(auth_headers=auth_headers)
+            # pode passar como primeiro argumento posicional
+            yt = YTMusic(auth_headers)  # ou: YTMusic(auth=auth_headers)
         else:
             # fallback: usar arquivo local (quando você roda na sua máquina)
             ARQUIVO_AUTH = "browser.json"
