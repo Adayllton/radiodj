@@ -2,3 +2,4 @@ streamlit
 ytmusicapi
 google-generativeai
 lyricsgenius
+spotipy
