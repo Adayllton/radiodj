@@ -8,7 +8,7 @@ if defined _OLD_CODEPAGE (
     "%SystemRoot%\System32\chcp.com" 65001 > nul
 )
 
-set VIRTUAL_ENV=C:\Users\Adayllton\Downloads\dj_ia_streamlit\dj_ia_streamlit\venv
+set VIRTUAL_ENV=C:\Users\Adayllton\Documents\GitHub\radiodj\venv
 
 if not defined PROMPT set PROMPT=$P$G
 
