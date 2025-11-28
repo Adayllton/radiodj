@@ -1,16 +1,15 @@
-# spotify_setup.py - Execute este script localmente
+# spotify_setup.py
 import spotipy
 from spotipy.oauth2 import SpotifyOAuth
-import webbrowser
 
-def setup_spotify():
+def setup_spotify_token():
     print("🎵 Configuração do Spotify para DJ IA Escola")
     print("=" * 50)
     
-    # Peça as credenciais se não estiverem nos secrets
+    # Peça as credenciais
     client_id = input("Cole seu SPOTIFY_CLIENT_ID: ").strip()
     client_secret = input("Cole seu SPOTIFY_CLIENT_SECRET: ").strip()
-    redirect_uri = "https://radiodj.streamlit.app/"
+    redirect_uri = "http://localhost:8888/callback"
     
     # Peça o ID da playlist
     playlist_url = input("Cole o URL completo da sua playlist do Spotify: ").strip()
@@ -42,16 +41,6 @@ def setup_spotify():
             user = sp.current_user()
             print(f"✅ Autenticado com sucesso como: {user['display_name']}")
             
-            # Testa adicionar uma música (opcional)
-            try:
-                # Busca uma música de teste
-                results = sp.search(q="Queen Bohemian Rhapsody", type="track", limit=1)
-                if results['tracks']['items']:
-                    test_track = results['tracks']['items'][0]
-                    print(f"🎵 Música de teste encontrada: {test_track['name']}")
-            except Exception as e:
-                print(f"⚠️ Aviso: {e}")
-            
             print("\n🎉 CONFIGURAÇÃO CONCLUÍDA!")
             print("\n📋 Adicione estas variáveis aos seus secrets:")
             print(f"SPOTIFY_CLIENT_ID = \"{client_id}\"")
@@ -64,10 +53,6 @@ def setup_spotify():
             
     except Exception as e:
         print(f"❌ Erro durante a configuração: {e}")
-        print("\n💡 Dicas de solução:")
-        print("1. Verifique se o Client ID e Secret estão corretos")
-        print("2. Certifique-se de que adicionou o Redirect URI no Spotify Dashboard")
-        print("3. Tente novamente")
 
 if __name__ == "__main__":
-    setup_spotify()
+    setup_spotify_token()

@@ -1,5 +1,6 @@
-streamlit
-ytmusicapi
-google-generativeai
-lyricsgenius
-spotipy
+streamlit>=1.28.0
+spotipy>=2.25.0
+google-generativeai>=0.3.0
+lyricsgenius>=3.0.0
+requests>=2.31.0
+beautifulsoup4>=4.12.0
