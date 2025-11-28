@@ -80,88 +80,73 @@ def setup_genius():
             skip_non_songs=True,
             excluded_terms=["(Remix)", "(Live)"],
             remove_section_headers=True,
+            timeout=15,
+            retries=3,
+            sleep_time=2
         )
         genius.verbose = False
+        
+        # Headers personalizados para evitar bloqueio
+        genius._session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'application/json',
+            'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Referer': 'https://genius.com/',
+            'Connection': 'keep-alive',
+        })
+        
         return genius, None
     except Exception as e:
         return None, f"Erro ao configurar Genius: {e}"
+    
+# --- INICIALIZAÇÃO DAS VARIÁVEIS GLOBAIS ---
+# É aqui que 'chamamos' as funções para criar as variáveis que o resto do código usa
 
 model, sp, erro_setup = setup_apis()
 genius, erro_genius = setup_genius()
 
 # --- FUNÇÕES DE LÓGICA (SPOTIFY) ---
 
+def obter_letra_web(titulo: str, artista: str):
+    """
+    Tenta obter a letra via web usando Genius (lyricsgenius).
+    """
+    if genius is None:
+        return None
+
+    try:
+        artista_principal = artista.split(",")[0].strip() if artista else None
+
+        # 1) tenta com título + artista
+        if artista_principal:
+            song = genius.search_song(titulo, artista_principal)
+        else:
+            song = genius.search_song(titulo)
+
+        # 2) fallback: busca com "titulo artista"
+        if song is None:
+            query = f"{titulo} {artista_principal or ''}".strip()
+            song = genius.search_song(query)
+
+        if song and song.lyrics:
+            return song.lyrics
+
+    except Exception as e:
+        st.warning(f"Não consegui buscar a letra na web (Genius): {e}")
+
+    return None
+
 def obter_letra(titulo: str, artista: str):
     """
-    Tenta obter a letra de múltiplas fontes.
+    Tenta obter a letra via web (Genius).
     Retorna (letra, origem) ou (None, None).
     """
-    # 1. Tenta Vagalume primeiro (mais confiável para BR)
-    letra = obter_letra_vagalume(titulo, artista)
-    if letra:
-        return letra, "vagalume"
-    
-    # 2. Tenta Genius (pode ser bloqueado)
-    if genius is not None:
-        try:
-            artista_principal = artista.split(",")[0].strip() if artista else None
+    letra_web = obter_letra_web(titulo, artista)
+    if letra_web:
+        return letra_web, "genius"
 
-            if artista_principal:
-                song = genius.search_song(titulo, artista_principal)
-            else:
-                song = genius.search_song(titulo)
-
-            if song is None:
-                query = f"{titulo} {artista_principal or ''}".strip()
-                song = genius.search_song(query)
-
-            if song and song.lyrics:
-                return song.lyrics, "genius"
-                
-        except Exception as e:
-            st.warning(f"Genius bloqueado: {e}")
-    
-    # 3. Tenta letras.mus.br como fallback
-    letra = obter_letra_letras_mus_br(titulo, artista)
-    if letra:
-        return letra, "letras.mus.br"
-    
     return None, None
-
-def obter_letra_letras_mus_br(titulo: str, artista: str):
-    """
-    Fallback: tenta buscar do letras.mus.br (web scraping simples)
-    """
-    try:
-        import requests
-        from bs4 import BeautifulSoup
-        
-        # Limpa e formata os termos de busca
-        artista_limpo = artista.split(",")[0].split("&")[0].strip().lower()
-        titulo_limpo = titulo.lower()
-        
-        # Cria URL de busca
-        busca_url = f"https://www.letras.mus.br/{artista_limpo.replace(' ', '-')}/{titulo_limpo.replace(' ', '-')}/"
-        
-        response = requests.get(busca_url, timeout=10, headers={
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        })
-        
-        if response.status_code == 200:
-            soup = BeautifulSoup(response.content, 'html.parser')
-            
-            # Tenta encontrar a div com a letra
-            letra_div = soup.find('div', class_='cnt-letra')
-            if letra_div:
-                paragraphs = letra_div.find_all('p')
-                letra = '\n'.join([p.get_text() for p in paragraphs])
-                if letra.strip():
-                    return letra
-                    
-        return None
-        
-    except Exception:
-        return None
 
 def analisar_com_ia(titulo, artista, is_explicit, letra=None):
     # limita o tamanho da letra só por segurança
