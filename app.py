@@ -1,24 +1,24 @@
 import streamlit as st
-from ytmusicapi import YTMusic, OAuthCredentials
+import spotipy
+from spotipy.oauth2 import SpotifyOAuth
 import google.generativeai as genai
 import json
 import os
 from lyricsgenius import Genius
 
 # --- CONFIGURAÇÕES ---
-PLAYLIST_ID = "PL_45f9jLesgjdE5usz75-zDtBt7ChSM5f"  # sem &jct
+SPOTIFY_PLAYLIST_ID = st.secrets.get("SPOTIFY_PLAYLIST_ID") or os.getenv("SPOTIFY_PLAYLIST_ID")
 
 # chaves / tokens vêm de secrets ou variáveis de ambiente
 GEMINI_API_KEY = st.secrets.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
 GENIUS_ACCESS_TOKEN = st.secrets.get("GENIUS_ACCESS_TOKEN") or os.getenv("GENIUS_ACCESS_TOKEN")
 
-YT_CLIENT_ID = st.secrets.get("YT_CLIENT_ID") or os.getenv("YT_CLIENT_ID")
-YT_CLIENT_SECRET = st.secrets.get("YT_CLIENT_SECRET") or os.getenv("YT_CLIENT_SECRET")
-OAUTH_JSON = st.secrets.get("OAUTH_JSON") or os.getenv("OAUTH_JSON")
+SPOTIFY_CLIENT_ID = st.secrets.get("SPOTIFY_CLIENT_ID") or os.getenv("SPOTIFY_CLIENT_ID")
+SPOTIFY_CLIENT_SECRET = st.secrets.get("SPOTIFY_CLIENT_SECRET") or os.getenv("SPOTIFY_CLIENT_SECRET")
+SPOTIFY_REDIRECT_URI = st.secrets.get("SPOTIFY_REDIRECT_URI") or os.getenv("SPOTIFY_REDIRECT_URI", "http://localhost:8888/callback")
 
 # Configuração da Página
-st.set_page_config(page_title="DJ IA - Pedidos", page_icon="🎵")
-
+st.set_page_config(page_title="DJ IA - Pedidos (Spotify)", page_icon="🎵")
 
 # --- INICIALIZAÇÃO DAS APIS ---
 
@@ -34,30 +34,40 @@ def setup_apis():
     except Exception as e:
         return None, None, f"Erro ao configurar Gemini: {e}"
 
-    # --- YTMusic via OAuth (oauth.json + client_id/client_secret) ---
-    if not (OAUTH_JSON and YT_CLIENT_ID and YT_CLIENT_SECRET):
+    # --- Spotify OAuth ---
+    if not (SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET):
         return model, None, (
-            "OAuth do YTMusic não configurado. "
-            "Defina OAUTH_JSON, YT_CLIENT_ID e YT_CLIENT_SECRET nos secrets."
+            "Spotify OAuth não configurado. "
+            "Defina SPOTIFY_CLIENT_ID e SPOTIFY_CLIENT_SECRET nos secrets."
         )
 
     try:
-        # YTMusic espera um caminho de arquivo -> criamos um temporário
-        oauth_path = "oauth_runtime.json"
-        with open(oauth_path, "w", encoding="utf-8") as f:
-            f.write(OAUTH_JSON)
-
-        oauth_creds = OAuthCredentials(
-            client_id=YT_CLIENT_ID,
-            client_secret=YT_CLIENT_SECRET,
+        # Configuração do Spotify OAuth
+        sp_oauth = SpotifyOAuth(
+            client_id=SPOTIFY_CLIENT_ID,
+            client_secret=SPOTIFY_CLIENT_SECRET,
+            redirect_uri=SPOTIFY_REDIRECT_URI,
+            scope="playlist-modify-public playlist-modify-private",
+            cache_path=".spotify_cache"
         )
-
-        yt = YTMusic(oauth_path, oauth_credentials=oauth_creds)
-        return model, yt, None
+        
+        # Tenta obter token válido
+        token_info = sp_oauth.get_cached_token()
+        if not token_info:
+            # Se não tem token cacheado, tenta renovar
+            token_info = sp_oauth.refresh_access_token(sp_oauth.get_cached_token().get('refresh_token')) if sp_oauth.get_cached_token() else None
+            
+        if not token_info:
+            return model, None, (
+                "Não foi possível autenticar com o Spotify. "
+                "Execute o script de setup primeiro para gerar o token."
+            )
+            
+        sp = spotipy.Spotify(auth=token_info['access_token'])
+        return model, sp, None
 
     except Exception as e:
-        return None, None, f"Erro ao configurar YTMusic: {e}"
-
+        return None, None, f"Erro ao configurar Spotify: {e}"
 
 @st.cache_resource
 def setup_genius():
@@ -76,52 +86,14 @@ def setup_genius():
     except Exception as e:
         return None, f"Erro ao configurar Genius: {e}"
 
-
-model, yt, erro_setup = setup_apis()
+model, sp, erro_setup = setup_apis()
 genius, erro_genius = setup_genius()
 
-
-# --- FUNÇÕES DE LÓGICA ---
-
-def obter_letra_ytmusic(video_id: str):
-    """Tenta obter a letra da música a partir do YouTube Music."""
-    if yt is None:
-        return None
-
-    try:
-        # 1) algumas versões aceitam videoId direto
-        try:
-            dados = yt.get_lyrics(video_id)
-            if dados and isinstance(dados, dict) and dados.get("lyrics"):
-                return dados["lyrics"]
-        except Exception:
-            pass  # se falhar, tenta o fluxo "oficial"
-
-        # 2) fluxo documentado: get_watch_playlist -> lyrics.browseId -> get_lyrics
-        watch = yt.get_watch_playlist(videoId=video_id)
-        lyrics_info = watch.get("lyrics") if isinstance(watch, dict) else None
-        if not lyrics_info:
-            return None
-
-        browse_id = lyrics_info.get("browseId")
-        if not browse_id:
-            return None
-
-        dados = yt.get_lyrics(browse_id)
-        if dados and isinstance(dados, dict) and dados.get("lyrics"):
-            return dados["lyrics"]
-
-        return None
-
-    except Exception as e:
-        st.warning(f"Não consegui buscar a letra pelo YouTube Music: {e}")
-        return None
-
+# --- FUNÇÕES DE LÓGICA (SPOTIFY) ---
 
 def obter_letra_web(titulo: str, artista: str):
     """
     Tenta obter a letra via web usando Genius (lyricsgenius).
-    Isso é o equivalente a 'procurar no navegador', mas via API.
     """
     if genius is None:
         return None
@@ -148,22 +120,16 @@ def obter_letra_web(titulo: str, artista: str):
 
     return None
 
-
-def obter_letra(titulo: str, artista: str, video_id: str):
+def obter_letra(titulo: str, artista: str):
     """
-    Tenta primeiro no YT Music, depois na web (Genius).
+    Tenta obter a letra via web (Genius).
     Retorna (letra, origem) ou (None, None).
     """
-    letra = obter_letra_ytmusic(video_id)
-    if letra:
-        return letra, "ytmusic"
-
     letra_web = obter_letra_web(titulo, artista)
     if letra_web:
         return letra_web, "genius"
 
     return None, None
-
 
 def analisar_com_ia(titulo, artista, is_explicit, letra=None):
     # limita o tamanho da letra só por segurança
@@ -181,11 +147,10 @@ def analisar_com_ia(titulo, artista, is_explicit, letra=None):
     Dados da música:
     - Título: {titulo}
     - Artista(s): {artista}
-    - Tag explícita do YouTube Music: {"Sim" if is_explicit else "Não"}
+    - Tag explícita do Spotify: {"Sim" if is_explicit else "Não"}
 
     LETRA COMPLETA (ou mensagem de erro, se não encontrada):
     \"\"\"{letra_limpa}\"\"\"
-
 
     REGRAS (muito importantes):
 
@@ -240,45 +205,66 @@ def analisar_com_ia(titulo, artista, is_explicit, letra=None):
         st.error(f"Erro na IA: {e}")
         return {"aprovado": False, "motivo": "Erro na análise da IA"}
 
-
-def buscar_musica(termo):
-    """Tenta várias estratégias até achar um resultado com videoId."""
-    if yt is None:
-        st.error("YTMusic não está configurado.")
+def buscar_musica_spotify(termo):
+    """Busca música no Spotify."""
+    if sp is None:
+        st.error("Spotify não está configurado.")
         return None
 
     try:
-        # 1) tenta como 'songs'
-        resultados = yt.search(termo, filter="songs", limit=3)
-        for m in resultados:
-            if m.get("videoId"):
-                return m
+        resultados = sp.search(q=termo, type="track", limit=5)
+        items = resultados["tracks"]["items"]
+        
+        if not items:
+            return None
 
-        # 2) tenta como 'videos'
-        resultados_v = yt.search(termo, filter="videos", limit=3)
-        for m in resultados_v:
-            if m.get("videoId"):
-                return m
-
-        # 3) busca geral sem filtro (pega qualquer coisa com videoId)
-        resultados_all = yt.search(termo, limit=5)
-        for m in resultados_all:
-            if m.get("videoId"):
-                return m
-
-        # nada encontrado com videoId
-        return None
+        # Pega o primeiro resultado
+        track = items[0]
+        
+        # Extrai informações
+        track_info = {
+            "id": track["id"],
+            "titulo": track["name"],
+            "artistas": ", ".join([artista["name"] for artista in track["artists"]]),
+            "capa": track["album"]["images"][0]["url"] if track["album"]["images"] else None,
+            "explicit": track["explicit"],
+            "preview_url": track.get("preview_url"),
+            "duration_ms": track["duration_ms"]
+        }
+        
+        return track_info
 
     except Exception as e:
-        st.error(f"Erro na busca: {e}")
+        st.error(f"Erro na busca no Spotify: {e}")
         return None
 
+def adicionar_na_playlist_spotify(track_id):
+    """Adiciona música à playlist do Spotify."""
+    if sp is None:
+        st.error("Spotify não está configurado.")
+        return False
+
+    try:
+        # Verifica se a música já está na playlist
+        playlist_tracks = sp.playlist_tracks(SPOTIFY_PLAYLIST_ID, fields="items(track(id))")
+        existing_tracks = [item["track"]["id"] for item in playlist_tracks["items"]]
+        
+        if track_id in existing_tracks:
+            return "DUPLICATE"
+        
+        # Adiciona à playlist
+        sp.playlist_add_items(SPOTIFY_PLAYLIST_ID, [track_id])
+        return "SUCCESS"
+        
+    except Exception as e:
+        st.error(f"Erro ao adicionar na playlist do Spotify: {e}")
+        return "ERROR"
 
 # --- INTERFACE (FRONT-END) ---
 
-st.title("🎧 DJ IA: Pedidos (modo Escola)")
+st.title("🎧 DJ IA: Pedidos (Spotify Edition)")
 st.write(
-    "A IA analisará a LETRA da música (YT Music e web) para ver se é adequada "
+    "A IA analisará a LETRA da música (via web) para ver se é adequada "
     "para tocar em ambiente escolar."
 )
 
@@ -297,67 +283,63 @@ if botao_enviar and pedido:
     if erro_setup:
         st.error("Não é possível processar pedidos enquanto houver erro de configuração nas APIs.")
     else:
-        with st.spinner('🔍 Buscando no YouTube Music...'):
-            musica = buscar_musica(pedido)
+        with st.spinner('🔍 Buscando no Spotify...'):
+            musica = buscar_musica_spotify(pedido)
 
         if musica:
             # Extraindo dados
-            titulo = musica["title"]
-            artistas = ", ".join([a["name"] for a in musica["artists"]])
-            capa = musica["thumbnails"][-1]["url"]  # melhor thumbnail disponível
-            video_id = musica.get("videoId")
-            is_explicit = musica.get("isExplicit", False)
+            titulo = musica["titulo"]
+            artistas = musica["artistas"]
+            capa = musica["capa"]
+            track_id = musica["id"]
+            is_explicit = musica["explicit"]
 
             col1, col2 = st.columns([1, 3])
             with col1:
-                st.image(capa, width=100)
+                if capa:
+                    st.image(capa, width=100)
             with col2:
                 st.subheader(titulo)
                 st.write(f"👤 {artistas}")
                 if is_explicit:
-                    st.caption("⚠️ Tag 'Explícita' detectada")
+                    st.caption("⚠️ Marcada como 'Explícita' no Spotify")
+                if musica.get("preview_url"):
+                    st.audio(musica["preview_url"], format="audio/mp3")
 
-            if not video_id:
-                st.error("Não foi possível obter um ID de vídeo válido para essa música.")
-            else:
-                # Buscar letra (YT Music -> Web/Genius)
-                with st.spinner("📝 Buscando a letra da música (YT Music e web)..."):
-                    letra, origem = obter_letra(titulo, artistas, video_id)
-                    if letra:
-                        origem_txt = "YouTube Music" if origem == "ytmusic" else "Genius (web)"
-                        st.success(f"Letra encontrada via {origem_txt}.")
-                        with st.expander("Ver letra da música"):
-                            st.text(letra)
-                    else:
-                        st.info(
-                            "Não encontrei a letra dessa música em nenhuma fonte. "
-                            "Vou decidir só com título + artista + tag explícita."
-                        )
-
-                # Análise da IA
-                with st.spinner('🤖 A IA está analisando a letra para ambiente escolar...'):
-                    decisao = analisar_com_ia(titulo, artistas, is_explicit, letra)
-
-                if decisao.get("aprovado"):
-                    try:
-                        resp = yt.add_playlist_items(PLAYLIST_ID, [video_id])
-                        status = resp.get("status") if isinstance(resp, dict) else None
-
-                        if status == "STATUS_SUCCEEDED":
-                            st.success("✅ APROVADO! Adicionado à playlist da festa da escola.")
-                            st.balloons()
-                        elif status == "STATUS_DUPLICATE":
-                            st.info("ℹ️ A música já estava na playlist, então não foi adicionada de novo.")
-                        else:
-                            st.warning(f"Resposta da API inesperada: {resp}")
-                    except Exception as e:
-                        st.error(f"Erro ao adicionar na playlist: {e}")
-                    st.caption(f"Motivo da aprovação: {decisao.get('motivo', 'Sem motivo informado')}")
+            # Buscar letra (apenas web/Genius agora)
+            with st.spinner("📝 Buscando a letra da música na web..."):
+                letra, origem = obter_letra(titulo, artistas)
+                if letra:
+                    st.success(f"Letra encontrada via {origem}.")
+                    with st.expander("Ver letra da música"):
+                        st.text(letra)
                 else:
-                    st.error("🚫 RECUSADO PARA AMBIENTE ESCOLAR")
-                    st.warning(f"Motivo: {decisao.get('motivo', 'Sem motivo informado')}")
+                    st.info(
+                        "Não encontrei a letra dessa música. "
+                        "Vou decidir só com título + artista + tag explícita."
+                    )
+
+            # Análise da IA
+            with st.spinner('🤖 A IA está analisando a letra para ambiente escolar...'):
+                decisao = analisar_com_ia(titulo, artistas, is_explicit, letra)
+
+            if decisao.get("aprovado"):
+                resultado = adicionar_na_playlist_spotify(track_id)
+                
+                if resultado == "SUCCESS":
+                    st.success("✅ APROVADO! Adicionado à playlist da festa da escola.")
+                    st.balloons()
+                elif resultado == "DUPLICATE":
+                    st.info("ℹ️ A música já estava na playlist, então não foi adicionada de novo.")
+                else:
+                    st.error("Erro ao adicionar na playlist do Spotify.")
+                    
+                st.caption(f"Motivo da aprovação: {decisao.get('motivo', 'Sem motivo informado')}")
+            else:
+                st.error("🚫 RECUSADO PARA AMBIENTE ESCOLAR")
+                st.warning(f"Motivo: {decisao.get('motivo', 'Sem motivo informado')}")
         else:
-            st.warning("Música não encontrada no YouTube Music. Tente ser mais específico.")
+            st.warning("Música não encontrada no Spotify. Tente ser mais específico.")
 
 st.divider()
-st.caption("Desenvolvido com Python, Streamlit, YTMusicAPI, Genius (web) e Gemini (modo Escola 🏫)")
+st.caption("Desenvolvido com Python, Streamlit, Spotipy, Genius e Gemini (modo Escola 🏫)")
