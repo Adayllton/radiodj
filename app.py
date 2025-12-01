@@ -99,38 +99,147 @@ def setup_genius():
 model, sp, erro_setup = setup_apis()
 genius, erro_genius = setup_genius()
 
-# --- FUNÇÕES DE BUSCA DE LETRAS (MÚLTIPLAS FONTES) ---
+# --- FUNÇÕES DE BUSCA DE MÚSICA (SPOTIFY) COM DADOS COMPLETOS ---
 
-def limpar_nome_artista(artista: str) -> str:
-    """Limpa o nome do artista removendo featured, com, etc."""
-    if not artista:
-        return ""
-    
-    # Remove tudo depois de vírgulas, &, feat., com, etc.
-    artista = artista.split(',')[0].split('&')[0].split('feat.')[0].split('ft.')[0].split('com')[0].split('with')[0]
-    
-    # Remove parênteses e seu conteúdo
-    artista = re.sub(r'\([^)]*\)', '', artista)
-    
-    # Remove espaços extras
-    artista = artista.strip()
-    
-    return artista
+def buscar_musica_spotify(termo):
+    """Busca música no Spotify e retorna TODOS os dados disponíveis."""
+    if sp is None:
+        st.error("Spotify não está configurado.")
+        return None
 
-def obter_letra_vagalume(titulo: str, artista: str):
-    """Fonte PRINCIPAL: API do Vagalume (excelente para músicas BR)."""
     try:
-        artista_limpo = limpar_nome_artista(artista)
+        resultados = sp.search(q=termo, type="track", limit=5)
+        items = resultados["tracks"]["items"]
         
-        if not artista_limpo or not titulo:
+        if not items:
             return None
+
+        # Pega o primeiro resultado
+        track = items[0]
+        
+        # Extrai TODOS os dados relevantes
+        track_info = {
+            # IDENTIFICAÇÃO
+            "id": track["id"],
+            "uri": track["uri"],
+            "spotify_url": track["external_urls"]["spotify"],
             
-        # URL da API do Vagalume
+            # INFORMAÇÕES BÁSICAS
+            "titulo": track["name"],
+            "artistas_nomes": [artista["name"] for artista in track["artists"]],
+            "artistas_ids": [artista["id"] for artista in track["artists"]],
+            "artista_principal": track["artists"][0]["name"] if track["artists"] else "",
+            "artistas_string": ", ".join([artista["name"] for artista in track["artists"]]),
+            
+            # ÁLBUM
+            "album_nome": track["album"]["name"],
+            "album_id": track["album"]["id"],
+            "album_tipo": track["album"]["album_type"],
+            "album_artistas": [artista["name"] for artista in track["album"]["artists"]],
+            "data_lancamento": track["album"]["release_date"],
+            "total_faixas": track["album"]["total_tracks"],
+            
+            # METADADOS
+            "explicit": track["explicit"],
+            "popularidade": track.get("popularity", 0),
+            "numero_faixa": track.get("track_number", 1),
+            "disco_numero": track.get("disc_number", 1),
+            "duracao_ms": track["duration_ms"],
+            "duracao_min": round(track["duration_ms"] / 60000, 2),
+            
+            # IMAGENS
+            "capa_url": track["album"]["images"][0]["url"] if track["album"]["images"] else None,
+            "capas": track["album"]["images"] if track["album"]["images"] else [],
+            
+            # EXTRAS
+            "preview_url": track.get("preview_url"),
+            "disponivel_mercados": track.get("available_markets", []),
+            
+            # TIMESTAMPS
+            "adicionado_em": track.get("added_at"),
+            "eh_local": track.get("is_local", False),
+            
+            # DADOS COMPLEMENTARES PARA BUSCA
+            "dados_completos": track  # Mantém os dados brutos completos
+        }
+        
+        return track_info
+
+    except Exception as e:
+        st.error(f"Erro na busca no Spotify: {e}")
+        return None
+
+# --- FUNÇÕES DE LIMPEZA E PREPARAÇÃO DE DADOS ---
+
+def preparar_dados_para_busca(musica_info):
+    """Prepara múltiplas variações dos dados para busca de letras."""
+    titulo = musica_info["titulo"]
+    artistas = musica_info["artistas_nomes"]
+    artista_principal = musica_info["artista_principal"]
+    album = musica_info["album_nome"]
+    
+    variacoes = []
+    
+    # Variação 1: Título original + todos artistas
+    variacoes.append({
+        "titulo": titulo,
+        "artista": ", ".join(artistas),
+        "descricao": "Título original + todos artistas"
+    })
+    
+    # Variação 2: Título original + artista principal
+    variacoes.append({
+        "titulo": titulo,
+        "artista": artista_principal,
+        "descricao": "Título original + artista principal"
+    })
+    
+    # Variação 3: Título limpo (sem parênteses) + artista principal
+    titulo_limpo = re.sub(r'\([^)]*\)', '', titulo).strip()
+    if titulo_limpo != titulo:
+        variacoes.append({
+            "titulo": titulo_limpo,
+            "artista": artista_principal,
+            "descricao": "Título limpo + artista principal"
+        })
+    
+    # Variação 4: Título original + artista principal + álbum (para APIs que suportam)
+    variacoes.append({
+        "titulo": titulo,
+        "artista": artista_principal,
+        "album": album,
+        "descricao": "Título + artista + álbum"
+    })
+    
+    # Variação 5: Título em minúsculas + artista principal
+    variacoes.append({
+        "titulo": titulo.lower(),
+        "artista": artista_principal.lower(),
+        "descricao": "Tudo em minúsculas"
+    })
+    
+    # Variação 6: Remover "feat.", "ft.", "com", etc.
+    titulo_sem_feat = re.sub(r'\s*(feat\.|ft\.|com|with|&)\s*[^)]+', '', titulo, flags=re.IGNORECASE).strip()
+    if titulo_sem_feat != titulo:
+        variacoes.append({
+            "titulo": titulo_sem_feat,
+            "artista": artista_principal,
+            "descricao": "Título sem 'feat.' + artista principal"
+        })
+    
+    return variacoes
+
+# --- FUNÇÕES DE BUSCA DE LETRAS (MÚLTIPLAS FONTES COM DADOS COMPLETOS) ---
+
+def obter_letra_vagalume(titulo, artista, album=None):
+    """Fonte PRINCIPAL: API do Vagalume."""
+    try:
+        # API do Vagalume aceita apenas artista e música
         url = "https://api.vagalume.com.br/search.php"
         params = {
-            "art": artista_limpo,
+            "art": artista,
             "mus": titulo,
-            "apikey": "free",  # API key gratuita
+            "apikey": "free",
             "limit": 1
         }
         
@@ -139,7 +248,6 @@ def obter_letra_vagalume(titulo: str, artista: str):
         if response.status_code == 200:
             data = response.json()
             
-            # Verifica se há resultados
             if "mus" in data and len(data["mus"]) > 0:
                 letra = data["mus"][0].get("text", "")
                 if letra and letra.strip():
@@ -147,86 +255,13 @@ def obter_letra_vagalume(titulo: str, artista: str):
         
         return None
         
-    except Exception as e:
-        return None
-
-def obter_letra_letras_mus_br(titulo: str, artista: str):
-    """Fonte alternativa: letras.mus.br (web scraping)."""
-    try:
-        artista_limpo = limpar_nome_artista(artista).lower().replace(' ', '-').replace("'", "")
-        titulo_limpo = titulo.lower().replace(' ', '-').replace("'", "")
-        
-        # Tenta construir a URL padrão
-        url = f"https://www.letras.mus.br/{artista_limpo}/{titulo_limpo}/"
-        
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        }
-        
-        response = requests.get(url, headers=headers, timeout=10)
-        
-        if response.status_code == 200:
-            # Procura a letra usando regex (mais simples que BeautifulSoup)
-            content = response.text
-            
-            # Procura pelo padrão comum das letras
-            patterns = [
-                r'<div[^>]*class="cnt-letra[^"]*"[^>]*>(.*?)</div>',
-                r'<div[^>]*class="lyric-original[^"]*"[^>]*>(.*?)</div>',
-                r'<div[^>]*itemprop="description"[^>]*>(.*?)</div>',
-            ]
-            
-            for pattern in patterns:
-                matches = re.search(pattern, content, re.DOTALL)
-                if matches:
-                    letra_html = matches.group(1)
-                    # Remove tags HTML
-                    letra = re.sub(r'<[^>]+>', '\n', letra_html)
-                    letra = re.sub(r'\n\s*\n', '\n', letra)  # Remove linhas vazias extras
-                    letra = letra.strip()
-                    
-                    if letra and len(letra) > 50:  # Verifica se tem conteúdo suficiente
-                        return letra
-        
-        return None
-        
     except Exception:
         return None
 
-def obter_letra_genius(titulo: str, artista: str):
-    """Fonte alternativa: Genius (pode estar bloqueada)."""
-    if genius is None:
-        return None
-
+def obter_letra_lyrics_ovh(titulo, artista, album=None):
+    """Fonte alternativa: API lyrics.ovh."""
     try:
-        artista_principal = limpar_nome_artista(artista)
-        
-        if artista_principal:
-            song = genius.search_song(titulo, artista_principal)
-        else:
-            song = genius.search_song(titulo)
-
-        # Fallback: busca apenas com título
-        if song is None:
-            query = f"{titulo} {artista_principal or ''}".strip()
-            song = genius.search_song(query)
-
-        if song and song.lyrics:
-            return song.lyrics
-
-    except Exception:
-        return None
-
-def obter_letra_lyrics_ovh(titulo: str, artista: str):
-    """Fonte alternativa: API lyrics.ovh (simples e gratuita)."""
-    try:
-        artista_limpo = limpar_nome_artista(artista)
-        
-        if not artista_limpo:
-            return None
-            
-        # URL encode os parâmetros
-        artista_encoded = quote(artista_limpo)
+        artista_encoded = quote(artista)
         titulo_encoded = quote(titulo)
         
         url = f"https://api.lyrics.ovh/v1/{artista_encoded}/{titulo_encoded}"
@@ -244,14 +279,82 @@ def obter_letra_lyrics_ovh(titulo: str, artista: str):
     
     return None
 
-def obter_letra(titulo: str, artista: str):
+def obter_letra_genius(titulo, artista, album=None):
+    """Fonte alternativa: Genius."""
+    if genius is None:
+        return None
+
+    try:
+        # Genius pode usar álbum para melhorar a busca
+        query = f"{titulo} {artista}"
+        if album:
+            query = f"{titulo} {artista} {album}"
+            
+        song = genius.search_song(query)
+        
+        if song and song.lyrics:
+            return song.lyrics
+
+    except Exception:
+        return None
+
+def obter_letra_letras_mus_br(titulo, artista, album=None):
+    """Fonte alternativa: letras.mus.br."""
+    try:
+        # Prepara URL amigável
+        artista_limpo = artista.lower().replace(' ', '-').replace("'", "")
+        titulo_limpo = titulo.lower().replace(' ', '-').replace("'", "")
+        
+        # Tenta várias variações de URL
+        urls = [
+            f"https://www.letras.mus.br/{artista_limpo}/{titulo_limpo}/",
+            f"https://www.letras.mus.br/{artista_limpo.replace('-', '_')}/{titulo_limpo.replace('-', '_')}/",
+        ]
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        
+        for url in urls:
+            try:
+                response = requests.get(url, headers=headers, timeout=10)
+                
+                if response.status_code == 200:
+                    # Procura padrões comuns de letras
+                    content = response.text
+                    
+                    patterns = [
+                        r'<div[^>]*class="cnt-letra[^"]*"[^>]*>(.*?)</div>',
+                        r'<div[^>]*class="lyric-original[^"]*"[^>]*>(.*?)</div>',
+                        r'<div[^>]*itemprop="description"[^>]*>(.*?)</div>',
+                    ]
+                    
+                    for pattern in patterns:
+                        matches = re.search(pattern, content, re.DOTALL)
+                        if matches:
+                            letra_html = matches.group(1)
+                            letra = re.sub(r'<[^>]+>', '\n', letra_html)
+                            letra = re.sub(r'\n\s*\n', '\n', letra)
+                            letra = letra.strip()
+                            
+                            if letra and len(letra) > 50:
+                                return letra
+            except:
+                continue
+        
+        return None
+        
+    except Exception:
+        return None
+
+def buscar_letra_com_dados_completos(musica_info):
     """
-    Busca letra em MÚLTIPLAS fontes na ordem de prioridade:
-    1. Vagalume (melhor para BR)
-    2. Lyrics.ovh (API simples)
-    3. Genius (se disponível)
-    4. Letras.mus.br (fallback)
+    Busca letra usando TODOS os dados da música.
+    Tenta múltiplas combinações e múltiplas fontes.
     """
+    # Prepara todas as variações de busca
+    variacoes = preparar_dados_para_busca(musica_info)
+    
     fontes = [
         ("vagalume", obter_letra_vagalume),
         ("lyrics.ovh", obter_letra_lyrics_ovh),
@@ -259,29 +362,50 @@ def obter_letra(titulo: str, artista: str):
         ("letras.mus.br", obter_letra_letras_mus_br),
     ]
     
-    for nome_fonte, funcao_busca in fontes:
-        try:
-            letra = funcao_busca(titulo, artista)
-            if letra:
-                # Verifica se a letra tem conteúdo válido
-                if len(letra.strip()) > 50:  # Pelo menos 50 caracteres
-                    return letra, nome_fonte
-        except Exception:
-            continue
+    resultados_tentativas = []
     
-    return None, None
+    for variavel in variacoes:
+        for nome_fonte, funcao_busca in fontes:
+            try:
+                letra = funcao_busca(
+                    titulo=variavel["titulo"],
+                    artista=variavel["artista"],
+                    album=variavel.get("album")
+                )
+                
+                if letra and len(letra.strip()) > 50:
+                    resultados_tentativas.append({
+                        "letra": letra.strip(),
+                        "fonte": nome_fonte,
+                        "variavel_usada": variavel["descricao"],
+                        "titulo_usado": variavel["titulo"],
+                        "artista_usado": variavel["artista"],
+                        "comprimento": len(letra.strip())
+                    })
+                    
+            except Exception:
+                continue
+    
+    # Ordena por melhor resultado (maior comprimento de letra primeiro)
+    if resultados_tentativas:
+        resultados_tentativas.sort(key=lambda x: x["comprimento"], reverse=True)
+        melhor_resultado = resultados_tentativas[0]
+        return melhor_resultado["letra"], melhor_resultado["fonte"], melhor_resultado["variavel_usada"]
+    
+    return None, None, None
 
-# --- FUNÇÕES RESTANTES (MANTIDAS) ---
+# --- FUNÇÕES DE ANÁLISE E ADIÇÃO À PLAYLIST ---
 
 def analisar_com_ia(titulo, artista, is_explicit, letra=None):
-    # limita o tamanho da letra só por segurança
+    """Analisa a música com IA usando dados completos."""
     letra_limpa = (
         letra
         or "NÃO FOI POSSÍVEL OBTER A LETRA. Use apenas título, artista e tag explícita."
     ).strip()
     
-    # Remove linhas muito longas que podem quebrar o prompt
-    letra_limpa = '\n'.join([linha[:200] + '...' if len(linha) > 200 else linha for linha in letra_limpa.split('\n')])
+    # Remove linhas muito longas
+    letra_limpa = '\n'.join([linha[:200] + '...' if len(linha) > 200 else linha 
+                            for linha in letra_limpa.split('\n')])
     
     if len(letra_limpa) > 6000:
         letra_limpa = letra_limpa[:6000] + "\n\n[trecho final omitido por tamanho]"
@@ -352,39 +476,6 @@ def analisar_com_ia(titulo, artista, is_explicit, letra=None):
         st.error(f"Erro na IA: {e}")
         return {"aprovado": False, "motivo": "Erro na análise da IA"}
 
-def buscar_musica_spotify(termo):
-    """Busca música no Spotify."""
-    if sp is None:
-        st.error("Spotify não está configurado.")
-        return None
-
-    try:
-        resultados = sp.search(q=termo, type="track", limit=5)
-        items = resultados["tracks"]["items"]
-        
-        if not items:
-            return None
-
-        # Pega o primeiro resultado
-        track = items[0]
-        
-        # Extrai informações
-        track_info = {
-            "id": track["id"],
-            "titulo": track["name"],
-            "artistas": ", ".join([artista["name"] for artista in track["artists"]]),
-            "capa": track["album"]["images"][0]["url"] if track["album"]["images"] else None,
-            "explicit": track["explicit"],
-            "preview_url": track.get("preview_url"),
-            "duration_ms": track["duration_ms"]
-        }
-        
-        return track_info
-
-    except Exception as e:
-        st.error(f"Erro na busca no Spotify: {e}")
-        return None
-
 def adicionar_na_playlist_spotify(track_id):
     """Adiciona música à playlist do Spotify."""
     if sp is None:
@@ -420,17 +511,30 @@ if erro_setup:
 if erro_genius:
     st.info(erro_genius)
 
-# Explicação sobre as fontes de letras
-with st.expander("ℹ️ Sobre as fontes de letras"):
+# Explicação sobre o sistema
+with st.expander("ℹ️ Sobre o sistema"):
     st.write("""
-    **Fontes utilizadas (na ordem de tentativa):**
+    **Dados coletados do Spotify:**
+    - Título da música
+    - Todos os artistas envolvidos
+    - Nome do álbum
+    - Data de lançamento
+    - Popularidade
+    - Tag explícita
+    - E muitos outros metadados
     
-    1. **Vagalume** - API oficial brasileira (melhor para músicas BR)
-    2. **Lyrics.ovh** - API internacional gratuita
-    3. **Genius** - Se disponível (pode estar temporariamente bloqueada)
-    4. **Letras.mus.br** - Site brasileiro como fallback
+    **Busca de letras:**
+    O sistema usa TODOS os dados disponíveis para buscar a letra correta em múltiplas fontes:
+    1. Vagalume (API brasileira)
+    2. Lyrics.ovh (API internacional)
+    3. Genius
+    4. Letras.mus.br
     
-    O sistema tenta automaticamente todas as fontes até encontrar a letra.
+    **Processo:**
+    - Coleta todos os dados do Spotify
+    - Cria múltiplas variações de busca
+    - Tenta todas as fontes com todas as variações
+    - Seleciona a melhor letra encontrada
     """)
 
 pedido = st.text_input(
@@ -447,30 +551,42 @@ if botao_enviar and pedido:
             musica = buscar_musica_spotify(pedido)
 
         if musica:
-            # Extraindo dados
+            # Exibe dados completos da música
+            with st.expander("📊 Ver todos os dados da música"):
+                st.json({k: v for k, v in musica.items() if k != "dados_completos"})
+            
+            # Extrai dados principais para exibição
             titulo = musica["titulo"]
-            artistas = musica["artistas"]
-            capa = musica["capa"]
+            artistas = musica["artistas_string"]
+            capa = musica["capa_url"]
             track_id = musica["id"]
             is_explicit = musica["explicit"]
+            album = musica["album_nome"]
+            lancamento = musica["data_lancamento"]
+            popularidade = musica["popularidade"]
 
             col1, col2 = st.columns([1, 3])
             with col1:
                 if capa:
-                    st.image(capa, width=100)
+                    st.image(capa, width=120)
+            
             with col2:
                 st.subheader(titulo)
-                st.write(f"👤 {artistas}")
+                st.write(f"**👤 Artistas:** {artistas}")
+                st.write(f"**💿 Álbum:** {album} ({lancamento})")
+                st.write(f"**⭐ Popularidade:** {popularidade}/100")
+                
                 if is_explicit:
-                    st.caption("⚠️ Marcada como 'Explícita' no Spotify")
+                    st.warning("⚠️ **Marcada como 'Explícita' no Spotify**")
+                
                 if musica.get("preview_url"):
                     st.audio(musica["preview_url"], format="audio/mp3")
 
-            # Buscar letra (múltiplas fontes)
-            with st.spinner("📝 Buscando a letra da música em múltiplas fontes..."):
-                letra, fonte = obter_letra(titulo, artistas)
+            # Buscar letra com dados completos
+            with st.spinner("📝 Buscando a letra com dados completos..."):
+                letra, fonte, variavel_usada = buscar_letra_com_dados_completos(musica)
+                
                 if letra:
-                    # Exibe qual fonte encontrou a letra
                     fonte_nome = {
                         "vagalume": "Vagalume",
                         "lyrics.ovh": "Lyrics.ovh", 
@@ -478,36 +594,39 @@ if botao_enviar and pedido:
                         "letras.mus.br": "Letras.mus.br"
                     }.get(fonte, fonte)
                     
-                    st.success(f"✅ Letra encontrada via {fonte_nome}.")
+                    st.success(f"✅ Letra encontrada via **{fonte_nome}**")
+                    st.info(f"🔍 Busca usou: *{variavel_usada}*")
+                    
                     with st.expander("📜 Ver letra da música"):
-                        st.text_area("Letra:", letra, height=300)
+                        st.text_area("Letra:", letra, height=300, key="letra_area")
                 else:
-                    st.info(
+                    st.warning(
                         "Não encontrei a letra dessa música em nenhuma fonte. "
-                        "Vou decidir só com título + artista + tag explícita."
+                        "Vou decidir só com os metadados disponíveis."
                     )
 
             # Análise da IA
-            with st.spinner('🤖 A IA está analisando a letra para ambiente escolar...'):
+            with st.spinner('🤖 A IA está analisando para ambiente escolar...'):
                 decisao = analisar_com_ia(titulo, artistas, is_explicit, letra)
 
             if decisao.get("aprovado"):
                 resultado = adicionar_na_playlist_spotify(track_id)
                 
                 if resultado == "SUCCESS":
-                    st.success("✅ APROVADO! Adicionado à playlist da festa da escola.")
+                    st.success("✅ **APROVADO!** Adicionado à playlist da festa da escola.")
                     st.balloons()
                 elif resultado == "DUPLICATE":
                     st.info("ℹ️ A música já estava na playlist, então não foi adicionada de novo.")
                 else:
                     st.error("Erro ao adicionar na playlist do Spotify.")
                     
-                st.caption(f"**Motivo da aprovação:** {decisao.get('motivo', 'Sem motivo informado')}")
+                st.caption(f"**📝 Motivo da aprovação:** {decisao.get('motivo', 'Sem motivo informado')}")
             else:
-                st.error("🚫 RECUSADO PARA AMBIENTE ESCOLAR")
-                st.warning(f"**Motivo:** {decisao.get('motivo', 'Sem motivo informado')}")
+                st.error("🚫 **RECUSADO PARA AMBIENTE ESCOLAR**")
+                st.warning(f"**📝 Motivo:** {decisao.get('motivo', 'Sem motivo informado')}")
         else:
             st.warning("Música não encontrada no Spotify. Tente ser mais específico.")
 
 st.divider()
-st.caption("🎵 Desenvolvido com Python, Streamlit, Spotipy, Gemini e múltiplas fontes de letras (modo Escola 🏫)")
+st.caption("🎵 **Desenvolvido com Python, Streamlit, Spotipy, Gemini e múltiplas fontes de letras**")
+st.caption("🏫 **Modo Escola - Análise de adequação para ambiente escolar**")
