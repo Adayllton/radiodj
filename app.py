@@ -10,6 +10,7 @@ import time
 import sqlite3
 from datetime import datetime
 import unicodedata
+from urllib.parse import quote
 
 # --- CONFIGURAÇÕES ---
 SPOTIFY_PLAYLIST_ID = st.secrets.get("SPOTIFY_PLAYLIST_ID") or os.getenv("SPOTIFY_PLAYLIST_ID")
@@ -40,7 +41,8 @@ def init_db():
             lyrics TEXT,
             source TEXT,
             created_at TIMESTAMP,
-            used_count INTEGER DEFAULT 0
+            used_count INTEGER DEFAULT 0,
+            last_used TIMESTAMP
         )
     ''')
     conn.commit()
@@ -49,11 +51,16 @@ def init_db():
 init_db()
 
 def get_cached_lyrics(spotify_id):
-    """Busca letra no cache."""
+    """Busca letra no cache e atualiza timestamp."""
     conn = sqlite3.connect('lyrics_cache.db')
     c = conn.cursor()
     c.execute('SELECT lyrics, source FROM lyrics WHERE spotify_id = ?', (spotify_id,))
     result = c.fetchone()
+    if result:
+        # Atualiza timestamp de uso
+        c.execute('UPDATE lyrics SET last_used = ?, used_count = used_count + 1 WHERE spotify_id = ?', 
+                 (datetime.now(), spotify_id))
+        conn.commit()
     conn.close()
     return result if result else (None, None)
 
@@ -63,9 +70,17 @@ def save_to_cache(spotify_id, title, artist, lyrics, source):
     c = conn.cursor()
     c.execute('''
         INSERT OR REPLACE INTO lyrics 
-        (spotify_id, title, artist, lyrics, source, created_at, used_count)
-        VALUES (?, ?, ?, ?, ?, ?, COALESCE((SELECT used_count FROM lyrics WHERE spotify_id = ?), 0) + 1)
-    ''', (spotify_id, title, artist, lyrics, source, datetime.now(), spotify_id))
+        (spotify_id, title, artist, lyrics, source, created_at, used_count, last_used)
+        VALUES (?, ?, ?, ?, ?, ?, 1, ?)
+    ''', (spotify_id, title, artist, lyrics, source, datetime.now(), datetime.now()))
+    conn.commit()
+    conn.close()
+
+def clear_cache():
+    """Limpa todo o cache."""
+    conn = sqlite3.connect('lyrics_cache.db')
+    c = conn.cursor()
+    c.execute('DELETE FROM lyrics')
     conn.commit()
     conn.close()
 
@@ -147,7 +162,7 @@ def buscar_musica_spotify(termo):
             "titulo": track["name"],
             "artista_principal": artista_principal,
             "artistas_completos": ", ".join(artistas),
-            "artistas_lista": artistas,  # Lista de todos os artistas
+            "artistas_lista": artistas,
             "capa": track["album"]["images"][0]["url"] if track["album"]["images"] else None,
             "explicit": track["explicit"],
             "preview_url": track.get("preview_url"),
@@ -163,8 +178,11 @@ def buscar_musica_spotify(termo):
 
 def limpar_texto_para_url(texto):
     """Remove acentos e caracteres especiais para uso em URLs."""
+    if not texto:
+        return ""
+    
     # Remove acentos
-    texto = ''.join(c for c in unicodedata.normalize('NFD', texto)
+    texto = ''.join(c for c in unicodedata.normalize('NFD', str(texto))
                    if unicodedata.category(c) != 'Mn')
     
     # Remove caracteres especiais, mantém letras, números e espaços
@@ -177,17 +195,39 @@ def limpar_texto_para_url(texto):
 
 def formatar_nome_artista(artista):
     """Formata nome do artista para busca."""
+    if not artista:
+        return ""
+    
     # Remove features, colabs, etc.
     artista = re.sub(r'\s+feat\.?\s+.*', '', artista, flags=re.IGNORECASE)
     artista = re.sub(r'\s+com\s+.*', '', artista, flags=re.IGNORECASE)
     artista = re.sub(r'\s+&\s+.*', '', artista, flags=re.IGNORECASE)
     artista = re.sub(r'\s+x\s+.*', '', artista, flags=re.IGNORECASE)
+    artista = re.sub(r'\s+ft\.?\s+.*', '', artista, flags=re.IGNORECASE)
+    artista = re.sub(r'\s+featuring\s+.*', '', artista, flags=re.IGNORECASE)
     
     # Remove parênteses e conteúdo dentro
     artista = re.sub(r'\([^)]*\)', '', artista)
     artista = re.sub(r'\[[^\]]*\]', '', artista)
     
     return artista.strip()
+
+def extrair_titulo_limpo(titulo):
+    """Extrai título limpo removendo versões e parênteses."""
+    if not titulo:
+        return ""
+    
+    # Remove conteúdo entre parênteses
+    titulo = re.sub(r'\([^)]*\)', '', titulo)
+    titulo = re.sub(r'\[[^\]]*\]', '', titulo)
+    
+    # Remove "feat", "remix", etc do título
+    titulo = re.sub(r'\s+feat\.?\s+.*$', '', titulo, flags=re.IGNORECASE)
+    titulo = re.sub(r'\s+remix$', '', titulo, flags=re.IGNORECASE)
+    titulo = re.sub(r'\s+version$', '', titulo, flags=re.IGNORECASE)
+    titulo = re.sub(r'\s+edit$', '', titulo, flags=re.IGNORECASE)
+    
+    return titulo.strip()
 
 # --- FUNÇÕES DE BUSCA DE LETRAS (ATUALIZADAS) ---
 
@@ -197,9 +237,12 @@ def buscar_letra_genius_direto(titulo, artista):
         return None
         
     try:
-        # Limpa o texto
-        titulo_limpo = re.sub(r'[^\w\s\-]', '', titulo)
+        # Limpa e formata
+        titulo_limpo = extrair_titulo_limpo(titulo)
         artista_limpo = formatar_nome_artista(artista)
+        
+        if not titulo_limpo or not artista_limpo:
+            return None
         
         # Busca no Genius API
         headers = {
@@ -207,10 +250,11 @@ def buscar_letra_genius_direto(titulo, artista):
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
         
-        # Primeiro busca a música
+        # Busca com query mais específica
         search_url = "https://api.genius.com/search"
+        query = f"{titulo_limpo} {artista_limpo}"
         params = {
-            'q': f"{titulo_limpo} {artista_limpo}",
+            'q': query,
             'per_page': 10
         }
         
@@ -220,16 +264,25 @@ def buscar_letra_genius_direto(titulo, artista):
             data = response.json()
             
             if data.get('response') and data['response'].get('hits'):
-                # Procura pelo hit mais relevante
-                for hit in data['response']['hits']:
+                # Procura pelo hit mais relevante (maior pontuação)
+                hits = data['response']['hits']
+                
+                for hit in hits:
                     result = hit['result']
-                    # Verifica se o título e artista são similares
                     result_title = result.get('title', '').lower()
                     result_artist = result.get('artist_names', '').lower()
                     
-                    if (titulo_limpo.lower() in result_title or 
-                        result_title in titulo_limpo.lower()):
-                        
+                    # Verifica similaridade do título e artista
+                    titulo_lower = titulo_limpo.lower()
+                    artista_lower = artista_limpo.lower()
+                    
+                    # Verifica se o artista e título são similares
+                    artista_match = any(art in result_artist for art in artista_lower.split()[:2]) or \
+                                  any(art in artista_lower for art in result_artist.split()[:2])
+                    
+                    titulo_match = titulo_lower in result_title or result_title in titulo_lower
+                    
+                    if artista_match and titulo_match:
                         # Agora busca a letra da música
                         song_url = f"https://api.genius.com/songs/{result['id']}"
                         song_response = requests.get(song_url, headers=headers, timeout=15)
@@ -237,40 +290,57 @@ def buscar_letra_genius_direto(titulo, artista):
                         if song_response.status_code == 200:
                             song_data = song_response.json()
                             
-                            # Tenta obter a letra da estrutura da API
-                            if 'song' in song_data and 'lyrics' in song_data['song']:
-                                letra = song_data['song']['lyrics']['plain']
-                                # Limpa tags HTML que podem vir
-                                letra = re.sub(r'<[^>]+>', '', letra)
+                            # Tenta obter a letra
+                            if 'song' in song_data:
+                                # Primeiro tenta via API
+                                if 'lyrics' in song_data['song']:
+                                    letra = song_data['song']['lyrics']['plain']
+                                else:
+                                    # Se não tiver na API, tenta via URL da página
+                                    song_url = result.get('url')
+                                    if song_url:
+                                        page_response = requests.get(song_url, headers=headers, timeout=15)
+                                        if page_response.status_code == 200:
+                                            # Extrai letra da página
+                                            content = page_response.text
+                                            # Procura pela div da letra
+                                            pattern = r'<div[^>]*data-lyrics-container="true"[^>]*>(.*?)</div>'
+                                            matches = re.findall(pattern, content, re.DOTALL)
+                                            if matches:
+                                                letra_html = ''.join(matches)
+                                                letra = re.sub(r'<[^>]+>', '', letra_html)
+                                                letra = re.sub(r'\[.*?\]', '', letra)  # Remove anotações
+                                            else:
+                                                continue
+                                        else:
+                                            continue
+                                    else:
+                                        continue
+                                
+                                # Limpa a letra
                                 letra = re.sub(r'\n\s*\n', '\n\n', letra)
-                                return letra.strip()
+                                letra = letra.strip()
+                                
+                                if letra and len(letra) > 100:
+                                    return letra
                         
         return None
         
     except Exception as e:
-        print(f"Erro Genius direto: {e}")
+        print(f"Erro Genius: {e}")
         return None
 
 def buscar_letra_letrasemus(titulo, artista):
     """Busca letra no site letras.mus.br com busca mais precisa."""
     try:
-        # Formata artista e título para URL
+        # Formata artista e título
         artista_limpo = formatar_nome_artista(artista)
-        titulo_limpo = re.sub(r'[^\w\s\-]', '', titulo)
+        titulo_limpo = extrair_titulo_limpo(titulo)
         
-        # Remove "feat", "com", etc.
-        artista_limpo = re.sub(r'\s+feat\.?\s+.*$', '', artista_limpo, flags=re.IGNORECASE)
-        artista_limpo = re.sub(r'\s+com\s+.*$', '', artista_limpo, flags=re.IGNORECASE)
-        artista_limpo = re.sub(r'\s+&\s+.*$', '', artista_limpo, flags=re.IGNORECASE)
+        if not artista_limpo or not titulo_limpo:
+            return None
         
-        # Remove parênteses e colchetes
-        artista_limpo = re.sub(r'\([^)]*\)', '', artista_limpo)
-        artista_limpo = re.sub(r'\[[^\]]*\]', '', artista_limpo)
-        
-        # Remove caracteres especiais e espaços extras
-        artista_limpo = artista_limpo.strip()
-        
-        # Prepara para URL
+        # Prepara para URL - versão mais limpa
         artista_url = limpar_texto_para_url(artista_limpo)
         titulo_url = limpar_texto_para_url(titulo_limpo)
         
@@ -278,75 +348,119 @@ def buscar_letra_letrasemus(titulo, artista):
         urls_tentativas = [
             f"https://www.letras.mus.br/{artista_url}/{titulo_url}/",
             f"https://www.letras.mus.br/{artista_url}/{titulo_url}/traducao.html",
-            f"https://www.letras.mus.br/{artista_url}/{titulo_url}.html",
+            f"https://www.letras.mus.br/{artista_url}/",
         ]
         
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
             'Accept-Language': 'pt-BR,pt;q=0.9,en;q=0.8',
-            'Referer': 'https://www.google.com/',
         }
         
         for url in urls_tentativas:
             try:
-                response = requests.get(url, headers=headers, timeout=10)
+                response = requests.get(url, headers=headers, timeout=10, allow_redirects=True)
                 
                 if response.status_code == 200:
                     content = response.text
                     
-                    # Verifica se encontrou a página certa (não é página de busca)
-                    if "Página não encontrada" not in content and "busca" not in content.lower():
-                        
-                        # Múltiplos padrões para encontrar a letra
-                        padroes = [
-                            r'<div[^>]*class="[^"]*cnt-letra[^"]*"[^>]*>(.*?)</div>',
-                            r'<div[^>]*class="[^"]*lyric-original[^"]*"[^>]*>(.*?)</div>',
-                            r'<div[^>]*class="[^"]*letra-cnt[^"]*"[^>]*>(.*?)</div>',
-                            r'<article[^>]*>(.*?)</article>',
-                        ]
-                        
-                        for padrao in padroes:
-                            matches = re.search(padrao, content, re.DOTALL | re.IGNORECASE)
-                            if matches:
-                                letra_html = matches.group(1)
-                                
-                                # Limpa tags HTML
-                                letra = re.sub(r'<[^>]+>', '', letra_html)
-                                
-                                # Remove scripts e styles
-                                letra = re.sub(r'<script[^>]*>.*?</script>', '', letra, flags=re.DOTALL | re.IGNORECASE)
-                                letra = re.sub(r'<style[^>]*>.*?</style>', '', letra, flags=re.DOTALL | re.IGNORECASE)
-                                
-                                # Substitui múltiplas quebras de linha
-                                letra = re.sub(r'\n\s*\n', '\n\n', letra)
-                                
-                                # Remove espaços no início das linhas
-                                letra = '\n'.join([line.strip() for line in letra.split('\n')])
-                                
-                                letra = letra.strip()
-                                
-                                if letra and len(letra) > 150:
-                                    # Verifica se realmente parece uma letra
-                                    linhas = letra.split('\n')
-                                    if len(linhas) > 5:
-                                        return letra
-                        
-                        # Se não encontrou pelos padrões, tenta extrair conteúdo entre tags <p>
-                        padrao_paragrafos = r'<p[^>]*>(.*?)</p>'
-                        paragrafos = re.findall(padrao_paragrafos, content, re.DOTALL | re.IGNORECASE)
-                        
-                        if paragrafos:
-                            letra_texto = []
-                            for p in paragrafos:
-                                p_limpo = re.sub(r'<[^>]+>', '', p)
-                                p_limpo = p_limpo.strip()
-                                if p_limpo and len(p_limpo) > 20:
-                                    letra_texto.append(p_limpo)
+                    # Verifica se é uma página de letra (não de busca)
+                    if "letra não encontrada" in content.lower() or "buscar" in content.lower()[:1000]:
+                        continue
+                    
+                    # Procura pela letra principal
+                    padroes = [
+                        r'<div[^>]*class="[^"]*cnt-letra[^"]*"[^>]*>(.*?)</div>',
+                        r'<div[^>]*class="[^"]*lyric-original[^"]*"[^>]*>(.*?)</div>',
+                        r'<article[^>]*>(.*?)</article>',
+                    ]
+                    
+                    for padrao in padroes:
+                        matches = re.search(padrao, content, re.DOTALL | re.IGNORECASE)
+                        if matches:
+                            letra_html = matches.group(1)
                             
-                            if letra_texto:
-                                letra = '\n\n'.join(letra_texto)
-                                if len(letra) > 150:
+                            # Extrai todos os parágrafos
+                            paragrafos = re.findall(r'<p>(.*?)</p>', letra_html, re.DOTALL)
+                            
+                            if paragrafos:
+                                letra_limpa = []
+                                for p in paragrafos:
+                                    # Remove tags HTML
+                                    p_clean = re.sub(r'<[^>]+>', '', p)
+                                    p_clean = re.sub(r'\s+', ' ', p_clean)
+                                    p_clean = p_clean.strip()
+                                    if p_clean and len(p_clean) > 10:
+                                        letra_limpa.append(p_clean)
+                                
+                                if letra_limpa:
+                                    letra = '\n\n'.join(letra_limpa)
+                                    if len(letra) > 150:
+                                        # Verifica se parece uma letra de música
+                                        if any(word in letra.lower() for word in ['refrão', 'verso', 'estribilho', 'coro']):
+                                            return letra
+                                        elif len(letra_limpa) > 3:  # Pelo menos 4 parágrafos
+                                            return letra
+                        
+                    # Alternativa: busca por divs com classe contendo "letra"
+                    pattern_alternativo = r'<div[^>]*class="[^"]*letra[^"]*"[^>]*>(.*?)</div>'
+                    matches = re.findall(pattern_alternativo, content, re.DOTALL | re.IGNORECASE)
+                    
+                    if matches:
+                        letra_html = ''.join(matches)
+                        letra = re.sub(r'<[^>]+>', '', letra_html)
+                        letra = re.sub(r'\n\s*\n', '\n\n', letra)
+                        letra = letra.strip()
+                        
+                        if letra and len(letra) > 150:
+                            return letra
+                
+            except requests.RequestException:
+                continue
+        
+        return None
+        
+    except Exception as e:
+        print(f"Erro letras.mus.br: {e}")
+        return None
+
+def buscar_letra_vagalume(titulo, artista):
+    """Busca letra no Vagalume com busca mais precisa."""
+    try:
+        # Limpa e formata
+        titulo_limpo = extrair_titulo_limpo(titulo)
+        artista_limpo = formatar_nome_artista(artista)
+        
+        if not artista_limpo or not titulo_limpo:
+            return None
+        
+        url = "https://api.vagalume.com.br/search.php"
+        
+        # Tenta várias combinações
+        combinacoes = [
+            {"art": artista_limpo, "mus": titulo_limpo},
+            {"art": artista_limpo, "mus": titulo_limpo.split('(')[0].strip()},  # Remove parênteses
+        ]
+        
+        for params in combinacoes:
+            params.update({"apikey": "free", "limit": 1})
+            
+            try:
+                response = requests.get(url, params=params, timeout=10)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    
+                    if "mus" in data and len(data["mus"]) > 0:
+                        musica = data["mus"][0]
+                        if musica.get("text"):
+                            letra = musica.get("text", "").strip()
+                            if letra and len(letra) > 100:
+                                # Verifica se o título corresponde
+                                titulo_api = musica.get("name", "").lower()
+                                if (titulo_limpo.lower() in titulo_api or 
+                                    titulo_api in titulo_limpo.lower() or
+                                    len(titulo_limpo.split()) <= 2):  # Se título curto, confia mais
                                     return letra
                 
             except requests.RequestException:
@@ -355,82 +469,26 @@ def buscar_letra_letrasemus(titulo, artista):
         return None
         
     except Exception as e:
-        print(f"Erro no letras.mus.br: {e}")
-        return None
-
-def buscar_letra_vagalume(titulo, artista):
-    """Busca letra no Vagalume com busca mais precisa."""
-    try:
-        # Limpa e formata
-        titulo_limpo = re.sub(r'[^\w\s\-]', '', titulo)
-        artista_limpo = formatar_nome_artista(artista)
-        
-        # Remove features
-        artista_limpo = re.sub(r'\s+feat\.?\s+.*$', '', artista_limpo, flags=re.IGNORECASE)
-        
-        url = "https://api.vagalume.com.br/search.php"
-        
-        # Tenta várias combinações
-        combinacoes = [
-            {"art": artista_limpo, "mus": titulo_limpo},
-            {"art": artista_limpo.split()[0] if artista_limpo.split() else artista_limpo, "mus": titulo_limpo},
-        ]
-        
-        for params in combinacoes:
-            params.update({"apikey": "free", "limit": 3})
-            
-            response = requests.get(url, params=params, timeout=10)
-            
-            if response.status_code == 200:
-                data = response.json()
-                
-                if "mus" in data and len(data["mus"]) > 0:
-                    # Procura a música mais parecida
-                    for musica in data["mus"]:
-                        if musica.get("text"):
-                            letra = musica.get("text", "").strip()
-                            if letra and len(letra) > 100:
-                                # Verifica se é realmente a música certa
-                                titulo_api = musica.get("name", "").lower()
-                                if (titulo_limpo.lower() in titulo_api or 
-                                    titulo_api in titulo_limpo.lower()):
-                                    return letra
-                    
-                    # Se não encontrou exato, pega a primeira com letra
-                    for musica in data["mus"]:
-                        if musica.get("text"):
-                            letra = musica.get("text", "").strip()
-                            if letra and len(letra) > 100:
-                                return letra
-        
-        return None
-        
-    except Exception as e:
-        print(f"Erro no Vagalume: {e}")
+        print(f"Erro Vagalume: {e}")
         return None
 
 def buscar_letra_azlyrics(titulo, artista):
     """Busca no AZLyrics com busca mais precisa."""
     try:
-        # Formata para URL do AZLyrics
         artista_limpo = formatar_nome_artista(artista)
-        titulo_limpo = titulo.lower()
+        titulo_limpo = extrair_titulo_limpo(titulo)
         
-        # Remove features e colaborações
-        artista_limpo = re.sub(r'\s+feat\.?\s+.*$', '', artista_limpo, flags=re.IGNORECASE)
-        artista_limpo = re.sub(r'\s+ft\.?\s+.*$', '', artista_limpo, flags=re.IGNORECASE)
-        artista_limpo = re.sub(r'\s+with\s+.*$', '', artista_limpo, flags=re.IGNORECASE)
+        if not artista_limpo or not titulo_limpo:
+            return None
         
-        # Remove tudo após "and", "&", "y" para pegar artista principal
-        artista_limpo = re.split(r'\s+and\s+|\s+&\s+|\s+y\s+', artista_limpo)[0]
-        
-        # Remove caracteres não alfanuméricos (exceto hífen)
+        # Formata para URL do AZLyrics
         artista_url = re.sub(r'[^a-z0-9]', '', artista_limpo.lower())
-        titulo_url = re.sub(r'[^a-z0-9]', '', titulo_limpo)
+        titulo_url = re.sub(r'[^a-z0-9]', '', titulo_limpo.lower())
         
-        # Se o título for muito longo, pega as primeiras palavras
-        if len(titulo_url) > 30:
-            titulo_url = re.sub(r'[^a-z0-9]', '', titulo_limpo.split()[0] if titulo_limpo.split() else titulo_limpo)
+        # Se muito longo, pega primeira palavra
+        if len(titulo_url) > 20:
+            first_word = titulo_limpo.lower().split()[0] if titulo_limpo.lower().split() else titulo_limpo.lower()
+            titulo_url = re.sub(r'[^a-z0-9]', '', first_word)
         
         url = f"https://www.azlyrics.com/lyrics/{artista_url}/{titulo_url}.html"
         
@@ -438,8 +496,6 @@ def buscar_letra_azlyrics(titulo, artista):
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.5',
-            'Referer': 'https://www.azlyrics.com/',
-            'DNT': '1',
         }
         
         response = requests.get(url, headers=headers, timeout=15)
@@ -447,14 +503,20 @@ def buscar_letra_azlyrics(titulo, artista):
         if response.status_code == 200:
             content = response.text
             
-            # Procura pelo padrão específico do AZLyrics
+            # Verifica se não é página de erro
+            if "page not found" in content.lower() or "404" in content.lower():
+                return None
+            
+            # Procura pelo marcador específico do AZLyrics
             start_marker = '<!-- Usage of azlyrics.com content by any third-party lyrics provider is prohibited by our licensing agreement. Sorry about that. -->'
-            end_marker = '</div>'
             
             if start_marker in content:
                 start_index = content.find(start_marker) + len(start_marker)
-                # Procura o próximo </div> após o marcador
-                end_index = content.find(end_marker, start_index)
+                # Procura o próximo </div> após 5000 caracteres
+                end_index = content.find('</div>', start_index + 5000)
+                
+                if end_index == -1:
+                    end_index = start_index + 10000
                 
                 if end_index > start_index:
                     letra_html = content[start_index:end_index]
@@ -462,35 +524,36 @@ def buscar_letra_azlyrics(titulo, artista):
                     # Limpa tags HTML
                     letra = re.sub(r'<[^>]+>', '', letra_html)
                     
-                    # Remove múltiplos espaços e quebras de linha
-                    letra = re.sub(r'\s+', ' ', letra)
+                    # Remove linhas em branco múltiplas
                     letra = re.sub(r'\n\s*\n', '\n\n', letra)
-                    
                     letra = letra.strip()
                     
                     if letra and len(letra) > 100:
-                        # Verifica se parece uma letra (tem múltiplas linhas)
+                        # Verifica se tem estrutura de letra
                         linhas = letra.split('\n')
-                        if len(linhas) > 3:
+                        if len(linhas) > 4:
                             return letra
         
         return None
         
     except Exception as e:
-        print(f"Erro no AZLyrics: {e}")
+        print(f"Erro AZLyrics: {e}")
         return None
 
 def buscar_letra_lyricscom(titulo, artista):
-    """Busca letra no Lyrics.com como fallback adicional."""
+    """Busca letra no Lyrics.com como fallback."""
     try:
         artista_limpo = formatar_nome_artista(artista)
-        titulo_limpo = re.sub(r'[^\w\s\-]', '', titulo)
+        titulo_limpo = extrair_titulo_limpo(titulo)
         
-        # Formata para URL
-        artista_url = re.sub(r'[^\w\s\-]', '', artista_limpo.replace(' ', '-')).lower()
-        titulo_url = re.sub(r'[^\w\s\-]', '', titulo_limpo.replace(' ', '-')).lower()
+        if not artista_limpo or not titulo_limpo:
+            return None
         
-        url = f"https://www.lyrics.com/lyric/{titulo_url}/{artista_url}"
+        # Codifica para URL
+        artista_encoded = quote(artista_limpo.lower().replace(' ', '-'))
+        titulo_encoded = quote(titulo_limpo.lower().replace(' ', '-'))
+        
+        url = f"https://www.lyrics.com/lyrics/{artista_encoded}/{titulo_encoded}"
         
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
@@ -502,8 +565,8 @@ def buscar_letra_lyricscom(titulo, artista):
             content = response.text
             
             # Procura pela letra
-            padrao = r'<pre[^>]*id="lyric-body-text"[^>]*>(.*?)</pre>'
-            matches = re.search(padrao, content, re.DOTALL)
+            pattern = r'<pre[^>]*id="lyric-body-text"[^>]*>(.*?)</pre>'
+            matches = re.search(pattern, content, re.DOTALL)
             
             if matches:
                 letra_html = matches.group(1)
@@ -518,15 +581,22 @@ def buscar_letra_lyricscom(titulo, artista):
     except Exception:
         return None
 
-def buscar_letra(titulo, artista, spotify_id):
+def buscar_letra_google(titulo, artista):
+    """Tenta buscar letra via Google Custom Search como último recurso."""
+    # Esta função requer Google Custom Search API key e Search Engine ID
+    # Por enquanto retorna None - pode ser implementada se tiver as credenciais
+    return None
+
+def buscar_letra(titulo, artista, spotify_id, force_refresh=False):
     """Busca letra em múltiplas fontes usando as informações exatas do Spotify."""
     
-    # 1. Verifica cache primeiro
-    cached_lyrics, source = get_cached_lyrics(spotify_id)
-    if cached_lyrics:
-        return cached_lyrics, "cache", "Letra em cache"
+    # Se force_refresh é True, ignora o cache
+    if not force_refresh:
+        cached_lyrics, source = get_cached_lyrics(spotify_id)
+        if cached_lyrics:
+            return cached_lyrics, "cache", "Letra em cache"
     
-    # 2. Lista de fontes para tentar (em ordem de prioridade)
+    # Lista de fontes para tentar (em ordem de prioridade)
     fontes = [
         ("genius", buscar_letra_genius_direto),
         ("letrasemus", buscar_letra_letrasemus),
@@ -536,45 +606,69 @@ def buscar_letra(titulo, artista, spotify_id):
     ]
     
     letras_encontradas = []
+    debug_info = []
     
     for fonte_nome, funcao_busca in fontes:
         try:
             # Pula Genius se não tiver token
             if fonte_nome == "genius" and not GENIUS_ACCESS_TOKEN:
+                debug_info.append(f"{fonte_nome}: Token não configurado")
                 continue
                 
             letra = funcao_busca(titulo, artista)
-            if letra and len(letra.strip()) > 150:  # Mínimo aumentado para 150 caracteres
+            
+            if letra:
+                letra_limpa = letra.strip()
+                tamanho = len(letra_limpa)
                 
-                # Verificação de qualidade da letra
-                linhas = letra.strip().split('\n')
-                if len(linhas) < 3:
-                    continue  # Muito curta, provavelmente não é uma letra completa
-                
-                # Verifica se não é uma página de erro ou busca
-                palavras_erro = ["página não encontrada", "404", "not found", "buscar", "search", "resultados"]
-                if any(palavra in letra.lower() for palavra in palavras_erro):
+                # Validações básicas
+                if tamanho < 50:
+                    debug_info.append(f"{fonte_nome}: Letra muito curta ({tamanho} chars)")
                     continue
                 
+                # Verifica se não é conteúdo de erro
+                palavras_erro = [
+                    "página não encontrada", "404", "not found", 
+                    "error", "buscar", "search", "resultados",
+                    "letra não disponível", "lyrics not available"
+                ]
+                
+                if any(palavra in letra_limpa.lower() for palavra in palavras_erro):
+                    debug_info.append(f"{fonte_nome}: Conteúdo de erro detectado")
+                    continue
+                
+                # Conta linhas não vazias
+                linhas = [l for l in letra_limpa.split('\n') if l.strip()]
+                
+                if len(linhas) < 3:
+                    debug_info.append(f"{fonte_nome}: Poucas linhas ({len(linhas)})")
+                    continue
+                
+                # Adiciona à lista de letras encontradas
                 letras_encontradas.append({
-                    "letra": letra.strip(),
+                    "letra": letra_limpa,
                     "fonte": fonte_nome,
-                    "tamanho": len(letra.strip()),
+                    "tamanho": tamanho,
                     "linhas": len(linhas)
                 })
                 
-                # Se encontrou uma letra boa de fonte confiável, salva e pode parar
-                if fonte_nome in ["genius", "letrasemus"] and len(letra.strip()) > 300:
-                    save_to_cache(spotify_id, titulo, artista, letra.strip(), fonte_nome)
-                    return letra.strip(), fonte_nome, f"Letra encontrada via {fonte_nome}"
+                debug_info.append(f"{fonte_nome}: Encontrada ({tamanho} chars, {len(linhas)} linhas)")
+                
+                # Se a fonte for muito confiável e a letra for boa, para aqui
+                if fonte_nome in ["genius", "letrasemus"] and tamanho > 300 and len(linhas) > 8:
+                    save_to_cache(spotify_id, titulo, artista, letra_limpa, fonte_nome)
+                    return letra_limpa, fonte_nome, f"Letra encontrada via {fonte_nome}"
+                
+            else:
+                debug_info.append(f"{fonte_nome}: Nenhuma letra encontrada")
                 
         except Exception as e:
-            print(f"Erro na fonte {fonte_nome}: {e}")
+            debug_info.append(f"{fonte_nome}: Erro - {str(e)[:50]}")
             continue
     
-    # 3. Escolhe a melhor letra (mais longa e com mais linhas)
+    # Escolhe a melhor letra
     if letras_encontradas:
-        # Prioriza letras mais longas e com mais linhas
+        # Ordena por tamanho e número de linhas
         letras_encontradas.sort(key=lambda x: (x["tamanho"], x["linhas"]), reverse=True)
         melhor = letras_encontradas[0]
         
@@ -583,8 +677,8 @@ def buscar_letra(titulo, artista, spotify_id):
         
         return melhor["letra"], melhor["fonte"], f"Letra encontrada via {melhor['fonte']}"
     
-    # 4. Se não encontrou nenhuma
-    return None, None, "Nenhuma letra encontrada nas fontes disponíveis"
+    # Se não encontrou nenhuma
+    return None, None, f"Nenhuma letra encontrada. Debug: {' | '.join(debug_info)}"
 
 # --- FUNÇÕES DE ANÁLISE ---
 
@@ -685,23 +779,51 @@ if GENIUS_ACCESS_TOKEN:
 else:
     st.warning("⚠️ Token Genius não configurado - buscas limitadas")
 
-# Input
+# Sidebar com controles
+with st.sidebar:
+    st.title("⚙️ Controles")
+    
+    if st.button("🧹 Limpar Cache", type="secondary"):
+        clear_cache()
+        st.success("Cache limpo com sucesso!")
+        st.rerun()
+    
+    force_refresh = st.checkbox("🔄 Forçar atualização (ignorar cache)")
+    
+    # Estatísticas do cache
+    conn = sqlite3.connect('lyrics_cache.db')
+    c = conn.cursor()
+    c.execute('SELECT COUNT(*) FROM lyrics')
+    total_cache = c.fetchone()[0]
+    c.execute('SELECT COUNT(DISTINCT artist) FROM lyrics')
+    artistas_unicos = c.fetchone()[0]
+    conn.close()
+    
+    st.metric("Letras em cache", total_cache)
+    st.metric("Artistas únicos", artistas_unicos)
+
+# Input principal
 pedido = st.text_input(
     "🔍 Buscar música:",
     placeholder="Ex: Mas Você Que Eu Amo - Franco",
-    help="Digite título e artista"
+    help="Digite título e artista",
+    key="busca_input"
 )
 
-col1, col2 = st.columns([3, 1])
+col1, col2, col3 = st.columns([2, 1, 1])
 with col1:
     buscar_btn = st.button("🎵 Buscar e Analisar", type="primary", use_container_width=True)
 with col2:
-    if st.button("🔄 Limpar", use_container_width=True):
+    if st.button("🔄 Limpar Busca", use_container_width=True):
+        st.session_state.pop('busca_input', None)
+        st.rerun()
+with col3:
+    if st.button("🔍 Nova Busca", use_container_width=True):
         st.rerun()
 
 if buscar_btn and pedido:
     
-    with st.spinner("Buscando no Spotify..."):
+    with st.spinner("🔎 Buscando no Spotify..."):
         musica = buscar_musica_spotify(pedido)
     
     if musica:
@@ -719,6 +841,7 @@ if buscar_btn and pedido:
             st.markdown(f"**👤 Artista:** {musica['artistas_completos']}")
             st.markdown(f"**💿 Álbum:** {musica['album']}")
             st.markdown(f"**⭐ Popularidade:** {musica['popularidade']}/100")
+            st.markdown(f"**🔗 ID Spotify:** `{musica['id']}`")
             
             if musica["explicit"]:
                 st.error("⚠️ **CONTEÚDO EXPLÍCITO**")
@@ -731,21 +854,29 @@ if buscar_btn and pedido:
         # Busca letra
         st.subheader("📝 Buscando Letra")
         
-        with st.spinner("Procurando letra em várias fontes..."):
+        with st.spinner("🔍 Procurando letra em várias fontes..."):
             letra, fonte, status = buscar_letra(
                 musica["titulo"],
                 musica["artista_principal"],
-                musica["id"]
+                musica["id"],
+                force_refresh
             )
         
         if letra:
             st.success(f"✅ {status}")
             
+            # Mostra informações sobre a letra
+            if fonte != "cache":
+                st.info(f"📥 Letra baixada de: **{fonte}**")
+            
             # Mostra um trecho da letra
             with st.expander("📜 Ver letra completa"):
                 # Formata melhor a letra para exibição
                 letra_formatada = letra.replace('\n\n', '\n\n')
-                st.text_area("", letra_formatada, height=300)
+                st.text_area("", letra_formatada, height=300, key=f"letra_{musica['id']}")
+                
+                # Informações sobre a letra
+                st.caption(f"📏 Tamanho: {len(letra)} caracteres, {len(letra.splitlines())} linhas")
         else:
             st.warning(f"⚠️ {status}")
             st.info("A análise será feita sem a letra da música.")
@@ -753,7 +884,7 @@ if buscar_btn and pedido:
         # Análise
         st.subheader("🤖 Análise para Escola")
         
-        with st.spinner("Analisando adequação..."):
+        with st.spinner("🧠 Analisando adequação..."):
             decisao = analisar_com_ia(
                 musica["titulo"],
                 musica["artistas_completos"],
@@ -768,16 +899,17 @@ if buscar_btn and pedido:
             st.success("🎉 **APROVADA PARA A ESCOLA**")
             st.balloons()
             
-            # Botão para adicionar
-            if st.button("➕ Adicionar à Playlist da Festa", type="primary"):
-                resultado = adicionar_na_playlist(musica["id"])
-                
-                if resultado == "SUCCESS":
-                    st.success("✅ Adicionada com sucesso!")
-                elif resultado == "DUPLICATE":
-                    st.info("ℹ️ Esta música já está na playlist")
-                else:
-                    st.error("❌ Erro ao adicionar")
+            col_add, _ = st.columns([1, 3])
+            with col_add:
+                if st.button("➕ Adicionar à Playlist da Festa", type="primary", key=f"add_{musica['id']}"):
+                    resultado = adicionar_na_playlist(musica["id"])
+                    
+                    if resultado == "SUCCESS":
+                        st.success("✅ Adicionada com sucesso!")
+                    elif resultado == "DUPLICATE":
+                        st.info("ℹ️ Esta música já está na playlist")
+                    else:
+                        st.error("❌ Erro ao adicionar")
             
             st.markdown(f"**📝 Motivo:** {decisao.get('motivo', 'Sem motivo especificado')}")
         
@@ -792,32 +924,23 @@ if buscar_btn and pedido:
 # Rodapé
 st.markdown("---")
 st.caption("🎶 Sistema de análise musical para ambiente escolar")
-st.caption("🔄 Cache de letras ativado | 🔐 Seguro | 🎯 Preciso")
+st.caption("🔄 Cache de letras ativado | 🔐 Seguro | 🎯 Preciso | 🧹 Cache controlável")
 
-# Estatísticas do cache
-conn = sqlite3.connect('lyrics_cache.db')
-c = conn.cursor()
-c.execute('SELECT COUNT(*) FROM lyrics')
-total_cache = c.fetchone()[0]
-conn.close()
-
-st.sidebar.title("📊 Estatísticas")
-st.sidebar.metric("Letras em cache", total_cache)
-
-# Testes rápidos
-st.sidebar.title("🧪 Testes Rápidos")
-test_musicas = [
-    "Bohemian Rhapsody - Queen",
-    "Blinding Lights - The Weeknd",
-    "Mas Você Que Eu Amo - Franco",
-    "Dance Monkey - Tones and I"
-]
-
-for test in test_musicas:
-    if st.sidebar.button(f"Testar: {test.split('-')[0].strip()}"):
-        st.session_state.test_input = test
-        st.rerun()
-
-if 'test_input' in st.session_state:
-    pedido = st.session_state.test_input
-    buscar_btn = True
+# Testes rápidos no sidebar
+with st.sidebar:
+    st.markdown("---")
+    st.subheader("🧪 Testes Rápidos")
+    
+    test_musicas = [
+        "Bohemian Rhapsody - Queen",
+        "Blinding Lights - The Weeknd",
+        "Mas Você Que Eu Amo - Franco",
+        "Dance Monkey - Tones and I",
+        "Smells Like Teen Spirit - Nirvana",
+        "Billie Jean - Michael Jackson"
+    ]
+    
+    for test in test_musicas:
+        if st.button(f"🎵 {test.split('-')[0].strip()}", key=f"test_{test}"):
+            st.session_state.busca_input = test
+            st.rerun()
