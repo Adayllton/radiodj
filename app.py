@@ -288,7 +288,7 @@ def analisar_com_ia(titulo, artista, is_explicit, letra=None):
 
     prompt = f"""
     Você é um avaliador de músicas para tocarem em uma ESCOLA, com crianças e adolescentes
-    (fundamental II / médio). Seu trabalho é decidir se a música é adequada em português, se for inglês tudo bem.
+    (fundamental II / médio). Seu trabalho é decidir se a música é adequada em português, se for inglês tudo bem, pode passar, ou em espanhol, so veirifoca se tem algo pesado no sentido de gore ou violência, mas questões como ser vulgar não tem problema em outra língua, pode passar.
 
     Dados da música:
     - Título: {titulo}
